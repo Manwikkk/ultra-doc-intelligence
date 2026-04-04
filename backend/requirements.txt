@@ -1,0 +1,27 @@
+# FastAPI
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+python-multipart==0.0.9
+
+# Document parsing
+PyMuPDF
+pdfplumber==0.11.0
+python-docx==1.1.0
+
+# Embeddings & Vector Store
+sentence-transformers==3.0.1
+faiss-cpu
+numpy==1.26.4
+
+# LLM providers
+groq==0.9.0
+openai==1.30.5
+google-generativeai==0.7.2
+requests==2.32.3
+
+# Utilities
+python-dotenv==1.0.1
+pydantic==2.7.1
+pydantic-settings==2.3.1
+httpx==0.27.0
+tiktoken==0.7.0
