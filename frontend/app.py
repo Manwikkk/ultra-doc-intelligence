@@ -41,7 +41,7 @@ st.markdown("""
     .stApp > header { background: transparent !important; }
     #MainMenu, footer { visibility: hidden; }
     .block-container {
-        padding-top: 0 !important;
+        padding-top: 3.5rem !important;
         padding-bottom: 2rem !important;
         max-width: 1100px !important;
         margin: 0 auto !important;
@@ -52,12 +52,8 @@ st.markdown("""
     .site-header {
         background: rgba(10, 15, 26, 0.95);
         border-bottom: 1px solid rgba(255,255,255,0.06);
-        padding: 0;
+        padding: 0 0 1rem 0;
         margin-bottom: 2.5rem;
-        position: sticky;
-        top: 0;
-        z-index: 100;
-        backdrop-filter: blur(12px);
     }
     .header-inner {
         max-width: 1100px;
