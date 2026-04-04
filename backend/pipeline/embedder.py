@@ -19,9 +19,14 @@ logger = logging.getLogger(__name__)
 @lru_cache(maxsize=1)
 def _load_model(model_name: str):
     """Load and cache the embedding model (loaded once at startup)."""
+    # Restrict PyTorch memory/threads to prevent Render OOM on 512MB tier
+    import torch
+    torch.set_num_threads(1)
+    torch.set_grad_enabled(False)
+    
     from sentence_transformers import SentenceTransformer
     logger.info("Loading embedding model: %s", model_name)
-    model = SentenceTransformer(model_name)
+    model = SentenceTransformer(model_name, device="cpu")
     logger.info("Embedding model loaded successfully")
     return model
 
