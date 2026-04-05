@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&weight=700&size=36&duration=3000&pause=1500&color=6366F1&center=true&vCenter=true&width=700&height=80&lines=Ultra+Doc-Intelligence;AI+Document+Analysis;Built+for+TMS+Professionals" alt="Ultra Doc-Intelligence" />
+<img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&weight=700&size=36&duration=3000&pause=1500&color=6366F1&center=true&vCenter=true&width=700&height=80&lines=Ultra+Doc-Intelligence;AI+Document+Analysis" alt="Ultra Doc-Intelligence" />
 
 <br/>
 
