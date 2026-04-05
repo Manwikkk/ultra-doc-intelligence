@@ -686,16 +686,16 @@ def provider_badge(provider: str) -> str:
     p = provider.lower()
     css  = {"groq": "pill-groq", "openai": "pill-openai", "gemini": "pill-gemini", "ollama": "pill-ollama"}.get(p, "pill-none")
     icon = {"groq": "⚡", "openai": "◆", "gemini": "✦", "ollama": "🦙"}.get(p, "•")
-    return f'<span class="provider-pill {css}">{icon} {provider}</span>'
+    return f'<span class="provider-pill {css}">{icon} Source: {provider}</span>'
 
 
 def conf_badge(score: float) -> str:
     if score >= 0.70:
-        cls, label = "conf-high", f"{score:.0%} High"
+        cls, label = "conf-high", f"Confidence: {score:.0%} High"
     elif score >= 0.45:
-        cls, label = "conf-medium", f"{score:.0%} Med"
+        cls, label = "conf-medium", f"Confidence: {score:.0%} Med"
     else:
-        cls, label = "conf-low", f"{score:.0%} Low"
+        cls, label = "conf-low", f"Confidence: {score:.0%} Low"
     return f'<span class="chat-conf-badge {cls}">{label}</span>'
 
 
@@ -961,7 +961,8 @@ with right_col:
 </div>
 """, unsafe_allow_html=True)
         else:
-            for i, turn in enumerate(st.session_state.chat_history):
+            chat_len = len(st.session_state.chat_history)
+            for loop_idx, (i, turn) in enumerate(reversed(list(enumerate(st.session_state.chat_history)))):
                 q         = turn["question"]
                 a         = turn["answer"]
                 conf      = turn["confidence"]
@@ -1027,7 +1028,7 @@ with right_col:
                                 st.markdown(f'<div class="log-line">{log}</div>', unsafe_allow_html=True)
 
                 # Thin divider between turns (skip after last)
-                if i < len(st.session_state.chat_history) - 1:
+                if loop_idx < chat_len - 1:
                     st.markdown(
                         '<hr style="border-color:rgba(255,255,255,0.04);margin:0.25rem 0 1rem 0">',
                         unsafe_allow_html=True,
