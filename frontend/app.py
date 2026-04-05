@@ -5,6 +5,10 @@ v2 Architecture:
   - Document parsing, chunking, and embedding (BAAI/bge-small-en) run here.
   - Backend (FastAPI) only does FAISS storage + LLM inference — no PyTorch.
   - Enables backend deployment on Render free tier (512 MB RAM).
+
+UI v3:
+  - Persistent chat history — Q&A accumulates across interactions.
+  - Extraction results shown in a separate tab — never clears chat.
 """
 from __future__ import annotations
 
@@ -14,6 +18,7 @@ import re
 import uuid
 import base64
 import logging
+import datetime
 from pathlib import Path
 
 import numpy as np
@@ -23,6 +28,7 @@ import streamlit.components.v1 as components
 
 logger = logging.getLogger(__name__)
 
+
 # ── Favicon helper ────────────────────────────────────────────────────────────
 def get_favicon():
     icon_path = Path(__file__).parent / "Document.png"
@@ -31,6 +37,7 @@ def get_favicon():
             data = base64.b64encode(f.read()).decode()
         return f"data:image/png;base64,{data}"
     return "📄"
+
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -54,7 +61,7 @@ st.markdown("""
     .block-container {
         padding-top: 3.5rem !important;
         padding-bottom: 2rem !important;
-        max-width: 1100px !important;
+        max-width: 1200px !important;
         margin: 0 auto !important;
     }
     section[data-testid="stSidebar"] { display: none !important; }
@@ -64,27 +71,27 @@ st.markdown("""
         background: rgba(10, 15, 26, 0.95);
         border-bottom: 1px solid rgba(255,255,255,0.06);
         padding: 0 0 1rem 0;
-        margin-bottom: 2.5rem;
+        margin-bottom: 2rem;
     }
     .header-inner {
-        max-width: 1100px;
+        max-width: 1200px;
         margin: 0 auto;
         display: flex;
         align-items: center;
         justify-content: space-between;
-        padding: 18px 0;
+        padding: 16px 0;
     }
     .header-brand { display: flex; flex-direction: column; }
     .header-title {
-        font-size: 1.25rem;
+        font-size: 1.2rem;
         font-weight: 700;
         color: #ffffff;
         letter-spacing: -0.4px;
         line-height: 1.2;
     }
     .header-subtitle {
-        font-size: 0.72rem;
-        color: rgba(255,255,255,0.32);
+        font-size: 0.7rem;
+        color: rgba(255,255,255,0.3);
         font-weight: 400;
         letter-spacing: 1.2px;
         text-transform: uppercase;
@@ -97,9 +104,9 @@ st.markdown("""
         background: rgba(255,255,255,0.04);
         border: 1px solid rgba(255,255,255,0.08);
         border-radius: 8px;
-        padding: 7px 16px;
-        font-size: 0.78rem;
-        color: rgba(255,255,255,0.5);
+        padding: 6px 14px;
+        font-size: 0.75rem;
+        color: rgba(255,255,255,0.45);
         font-weight: 500;
     }
     .dot-green {
@@ -117,13 +124,13 @@ st.markdown("""
 
     /* ── Section labels ── */
     .section-label {
-        font-size: 0.68rem;
+        font-size: 0.67rem;
         font-weight: 700;
         letter-spacing: 1.5px;
         text-transform: uppercase;
-        color: rgba(255,255,255,0.28);
-        margin-bottom: 0.65rem;
-        margin-top: 0.15rem;
+        color: rgba(255,255,255,0.25);
+        margin-bottom: 0.6rem;
+        margin-top: 0.1rem;
     }
 
     /* ── Cards ── */
@@ -131,15 +138,8 @@ st.markdown("""
         background: rgba(255,255,255,0.03);
         border: 1px solid rgba(255,255,255,0.07);
         border-radius: 12px;
-        padding: 1.25rem 1.5rem;
-        margin-bottom: 1rem;
-    }
-    .card-highlight {
-        background: linear-gradient(135deg, rgba(99,102,241,0.06), rgba(139,92,246,0.04));
-        border: 1px solid rgba(99,102,241,0.18);
-        border-radius: 12px;
-        padding: 1.4rem 1.6rem;
-        margin-bottom: 1rem;
+        padding: 1.1rem 1.3rem;
+        margin-bottom: 0.85rem;
     }
     .card-warning {
         background: rgba(245,158,11,0.06);
@@ -150,39 +150,76 @@ st.markdown("""
         margin-bottom: 1rem;
     }
 
-    /* ── Answer ── */
-    .answer-label {
-        font-size: 0.68rem;
+    /* ── Chat message bubbles ── */
+    .chat-question-row {
+        display: flex;
+        justify-content: flex-end;
+        margin-bottom: 0.5rem;
+    }
+    .chat-question-bubble {
+        background: linear-gradient(135deg, #6366f1, #8b5cf6);
+        color: #ffffff;
+        border-radius: 16px 16px 4px 16px;
+        padding: 0.7rem 1rem;
+        max-width: 85%;
+        font-size: 0.88rem;
+        line-height: 1.5;
+        font-weight: 500;
+    }
+    .chat-answer-row {
+        display: flex;
+        justify-content: flex-start;
+        margin-bottom: 1.25rem;
+    }
+    .chat-answer-bubble {
+        background: rgba(255,255,255,0.04);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 4px 16px 16px 16px;
+        padding: 0.9rem 1.1rem;
+        max-width: 92%;
+        font-size: 0.875rem;
+        color: rgba(255,255,255,0.85);
+        line-height: 1.8;
+    }
+    .chat-answer-guardrail {
+        background: rgba(239,68,68,0.07);
+        border: 1px solid rgba(239,68,68,0.2);
+        border-left: 3px solid #ef4444;
+        border-radius: 4px 16px 16px 16px;
+        padding: 0.9rem 1.1rem;
+        max-width: 92%;
+        font-size: 0.875rem;
+        color: #fca5a5;
+        line-height: 1.7;
+    }
+    .chat-meta {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-top: 0.55rem;
+        flex-wrap: wrap;
+    }
+    .chat-timestamp {
+        font-size: 0.65rem;
+        color: rgba(255,255,255,0.2);
+        font-family: 'JetBrains Mono', monospace;
+    }
+    .chat-conf-badge {
+        font-size: 0.67rem;
         font-weight: 700;
-        letter-spacing: 1.5px;
-        text-transform: uppercase;
-        color: rgba(99,102,241,0.7);
-        margin-bottom: 0.9rem;
+        padding: 2px 8px;
+        border-radius: 999px;
+        letter-spacing: 0.3px;
     }
-    .answer-text {
-        font-size: 0.975rem;
-        line-height: 1.9;
-        color: rgba(255,255,255,0.88);
-    }
-
-    /* ── Confidence ── */
-    .conf-label {
-        font-size: 0.68rem;
-        color: rgba(255,255,255,0.35);
-        margin-bottom: 5px;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-        font-weight: 600;
-    }
-    .conf-value-high   { font-size: 1.6rem; font-weight: 700; color: #22c55e; letter-spacing: -0.5px; }
-    .conf-value-medium { font-size: 1.6rem; font-weight: 700; color: #f59e0b; letter-spacing: -0.5px; }
-    .conf-value-low    { font-size: 1.6rem; font-weight: 700; color: #ef4444; letter-spacing: -0.5px; }
+    .conf-high   { background: rgba(34,197,94,0.12);  color: #22c55e;  border: 1px solid rgba(34,197,94,0.25); }
+    .conf-medium { background: rgba(245,158,11,0.12); color: #f59e0b;  border: 1px solid rgba(245,158,11,0.25); }
+    .conf-low    { background: rgba(239,68,68,0.12);  color: #ef4444;  border: 1px solid rgba(239,68,68,0.25); }
 
     /* ── Provider badge ── */
     .provider-pill {
-        display: inline-flex; align-items: center; gap: 6px;
-        padding: 5px 14px; border-radius: 999px;
-        font-size: 0.78rem; font-weight: 600; letter-spacing: 0.2px;
+        display: inline-flex; align-items: center; gap: 5px;
+        padding: 2px 10px; border-radius: 999px;
+        font-size: 0.68rem; font-weight: 600; letter-spacing: 0.2px;
     }
     .pill-groq   { background: rgba(0,212,170,0.1);  color: #00d4aa; border: 1px solid rgba(0,212,170,0.25); }
     .pill-openai { background: rgba(16,163,127,0.1); color: #10a37f; border: 1px solid rgba(16,163,127,0.25); }
@@ -190,58 +227,70 @@ st.markdown("""
     .pill-ollama { background: rgba(255,107,53,0.1); color: #ff6b35; border: 1px solid rgba(255,107,53,0.25); }
     .pill-none   { background: rgba(239,68,68,0.1);  color: #ef4444; border: 1px solid rgba(239,68,68,0.25); }
 
-    /* ── Guardrail ── */
-    .guardrail-alert {
-        background: rgba(239,68,68,0.07);
-        border: 1px solid rgba(239,68,68,0.22);
-        border-left: 3px solid #ef4444;
-        border-radius: 10px;
-        padding: 1rem 1.25rem;
-        color: #fca5a5;
-        font-size: 0.9rem;
-        font-weight: 500;
-        margin-bottom: 1rem;
-        line-height: 1.6;
+    /* ── Chat empty state ── */
+    .chat-empty {
+        text-align: center;
+        padding: 3.5rem 2rem;
+        color: rgba(255,255,255,0.18);
     }
+    .chat-empty-icon { font-size: 2rem; margin-bottom: 0.75rem; opacity: 0.3; }
+    .chat-empty-text { font-size: 0.875rem; line-height: 1.7; }
 
     /* ── Source chunk ── */
     .source-chunk {
-        background: rgba(255,255,255,0.025);
-        border: 1px solid rgba(255,255,255,0.06);
-        border-radius: 10px;
-        padding: 0.9rem 1.1rem;
-        margin: 0.5rem 0;
-        font-size: 0.84rem;
-        color: rgba(255,255,255,0.62);
+        background: rgba(255,255,255,0.02);
+        border: 1px solid rgba(255,255,255,0.05);
+        border-radius: 8px;
+        padding: 0.75rem 0.9rem;
+        margin: 0.4rem 0;
+        font-size: 0.82rem;
+        color: rgba(255,255,255,0.55);
         line-height: 1.7;
     }
     .chunk-meta {
-        font-size: 0.66rem;
-        color: rgba(255,255,255,0.28);
-        margin-bottom: 0.45rem;
+        font-size: 0.63rem;
+        color: rgba(255,255,255,0.25);
+        margin-bottom: 0.4rem;
         font-family: 'JetBrains Mono', monospace;
         text-transform: uppercase;
         letter-spacing: 0.5px;
     }
 
-    /* ── Field rows ── */
+    /* ── Field rows (extraction) ── */
     .field-row {
         display: flex; justify-content: space-between;
         align-items: flex-start;
-        padding: 10px 0;
+        padding: 9px 0;
         border-bottom: 1px solid rgba(255,255,255,0.04);
         gap: 1.5rem;
     }
     .field-row:last-child { border-bottom: none; }
-    .field-name  { color: rgba(255,255,255,0.36); font-size: 0.82rem; font-weight: 500; flex-shrink: 0; min-width: 175px; }
-    .field-value { color: #e2e8f0; font-size: 0.87rem; font-weight: 500; text-align: right; word-break: break-word; }
-    .field-null  { color: rgba(255,255,255,0.18); font-size: 0.82rem; font-style: italic; text-align: right; }
+    .field-name  { color: rgba(255,255,255,0.35); font-size: 0.8rem; font-weight: 500; flex-shrink: 0; min-width: 165px; }
+    .field-value { color: #e2e8f0; font-size: 0.85rem; font-weight: 500; text-align: right; word-break: break-word; }
+    .field-null  { color: rgba(255,255,255,0.18); font-size: 0.8rem; font-style: italic; text-align: right; }
+
+    /* ── Stats row ── */
+    .stats-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 0.85rem;
+        margin-bottom: 1.25rem;
+    }
+    .stat-box {
+        background: rgba(255,255,255,0.025);
+        border: 1px solid rgba(255,255,255,0.06);
+        border-radius: 10px;
+        padding: 0.9rem 1rem;
+        text-align: center;
+    }
+    .stat-val { font-size: 1.35rem; font-weight: 700; color: #fff; letter-spacing: -0.5px; }
+    .stat-key { font-size: 0.65rem; color: rgba(255,255,255,0.28); text-transform: uppercase; letter-spacing: 1px; margin-top: 3px; font-weight: 600; }
 
     /* ── Log ── */
     .log-line {
         font-family: 'JetBrains Mono', monospace;
-        font-size: 0.72rem;
-        color: rgba(255,255,255,0.38);
+        font-size: 0.7rem;
+        color: rgba(255,255,255,0.35);
         padding: 2px 0;
         line-height: 1.65;
     }
@@ -249,57 +298,53 @@ st.markdown("""
     /* ── Doc chip ── */
     .doc-chip {
         display: flex; align-items: flex-start; flex-direction: column; gap: 3px;
-        background: rgba(99,102,241,0.08);
-        border: 1px solid rgba(99,102,241,0.22);
+        background: rgba(99,102,241,0.07);
+        border: 1px solid rgba(99,102,241,0.2);
         border-radius: 10px;
-        padding: 10px 14px;
-        font-size: 0.84rem;
+        padding: 9px 13px;
+        font-size: 0.82rem;
         color: #a5b4fc;
         font-weight: 500;
         margin-top: 0.5rem;
         width: 100%;
     }
     .doc-chip-id {
-        font-size: 0.68rem;
+        font-size: 0.65rem;
         font-family: 'JetBrains Mono', monospace;
-        opacity: 0.55;
-        color: rgba(165,180,252,0.7);
+        opacity: 0.5;
+        color: rgba(165,180,252,0.65);
     }
-
-    /* ── Placeholder ── */
-    .placeholder-card {
-        background: rgba(255,255,255,0.02);
-        border: 1px dashed rgba(255,255,255,0.06);
-        border-radius: 14px;
-        padding: 4rem 2rem;
-        text-align: center;
-        margin-top: 1rem;
-    }
-    .placeholder-icon { font-size: 2.2rem; margin-bottom: 0.85rem; opacity: 0.35; }
-    .placeholder-text { color: rgba(255,255,255,0.22); font-size: 0.9rem; line-height: 1.7; }
-
-    /* ── Stats row ── */
-    .stats-grid {
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: 1rem;
-        margin-bottom: 1.5rem;
-    }
-    .stat-box {
-        background: rgba(255,255,255,0.025);
-        border: 1px solid rgba(255,255,255,0.06);
-        border-radius: 10px;
-        padding: 1rem 1.25rem;
-        text-align: center;
-    }
-    .stat-val { font-size: 1.5rem; font-weight: 700; color: #fff; letter-spacing: -0.5px; }
-    .stat-key { font-size: 0.68rem; color: rgba(255,255,255,0.3); text-transform: uppercase; letter-spacing: 1px; margin-top: 3px; font-weight: 600; }
 
     /* ── Divider ── */
     .section-divider {
         border: none;
         border-top: 1px solid rgba(255,255,255,0.05);
-        margin: 2rem 0;
+        margin: 1.5rem 0;
+    }
+
+    /* ── Tab styling ── */
+    .stTabs [data-baseweb="tab-list"] {
+        background: rgba(255,255,255,0.02) !important;
+        border-radius: 10px !important;
+        padding: 4px !important;
+        gap: 2px !important;
+        border: 1px solid rgba(255,255,255,0.06) !important;
+    }
+    .stTabs [data-baseweb="tab"] {
+        background: transparent !important;
+        border-radius: 8px !important;
+        color: rgba(255,255,255,0.4) !important;
+        font-size: 0.82rem !important;
+        font-weight: 600 !important;
+        padding: 6px 14px !important;
+        border: none !important;
+    }
+    .stTabs [aria-selected="true"] {
+        background: rgba(99,102,241,0.2) !important;
+        color: #a5b4fc !important;
+    }
+    .stTabs [data-baseweb="tab-panel"] {
+        padding-top: 1rem !important;
     }
 
     /* ── Streamlit form ── */
@@ -318,15 +363,14 @@ st.markdown("""
         border-radius: 10px !important;
         color: rgba(255,255,255,0.85) !important;
         font-family: 'Inter', sans-serif !important;
-        font-size: 0.92rem !important;
-        padding: 0.85rem 1rem !important;
+        font-size: 0.9rem !important;
+        padding: 0.8rem 1rem !important;
         line-height: 1.5 !important;
     }
     .stTextArea textarea:focus {
         border-color: rgba(99,102,241,0.45) !important;
         box-shadow: 0 0 0 3px rgba(99,102,241,0.08) !important;
     }
-
     .stButton > button, .stFormSubmitButton > button {
         font-family: 'Inter', sans-serif !important;
         font-weight: 600 !important;
@@ -338,7 +382,7 @@ st.markdown("""
     .stFormSubmitButton > button[kind="primaryFormSubmit"] {
         background: linear-gradient(135deg, #6366f1, #8b5cf6) !important;
         border: none !important;
-        font-size: 0.9rem !important;
+        font-size: 0.88rem !important;
     }
     .stButton > button[kind="primary"]:hover,
     .stFormSubmitButton > button[kind="primaryFormSubmit"]:hover {
@@ -349,8 +393,8 @@ st.markdown("""
     .stButton > button[kind="secondary"] {
         background: rgba(255,255,255,0.04) !important;
         border: 1px solid rgba(255,255,255,0.1) !important;
-        color: rgba(255,255,255,0.65) !important;
-        font-size: 0.88rem !important;
+        color: rgba(255,255,255,0.6) !important;
+        font-size: 0.85rem !important;
     }
     .stButton > button[kind="secondary"]:hover {
         background: rgba(255,255,255,0.07) !important;
@@ -363,55 +407,80 @@ st.markdown("""
     .stProgress { background: rgba(255,255,255,0.05) !important; border-radius: 4px; }
     div[data-testid="stFileUploader"] {
         background: rgba(99,102,241,0.03) !important;
-        border: 1.5px dashed rgba(99,102,241,0.2) !important;
+        border: 1.5px dashed rgba(99,102,241,0.18) !important;
         border-radius: 12px !important;
     }
     .streamlit-expanderHeader {
-        background: rgba(255,255,255,0.025) !important;
-        border: 1px solid rgba(255,255,255,0.06) !important;
+        background: rgba(255,255,255,0.02) !important;
+        border: 1px solid rgba(255,255,255,0.05) !important;
         border-radius: 8px !important;
-        font-size: 0.83rem !important;
-        color: rgba(255,255,255,0.48) !important;
+        font-size: 0.8rem !important;
+        color: rgba(255,255,255,0.4) !important;
     }
     hr { border-color: rgba(255,255,255,0.05) !important; }
     .stSuccess { background: rgba(34,197,94,0.07) !important; border: 1px solid rgba(34,197,94,0.18) !important; border-radius: 10px !important; color: #86efac !important; }
     .stError   { background: rgba(239,68,68,0.07) !important; border: 1px solid rgba(239,68,68,0.18) !important; border-radius: 10px !important; color: #fca5a5 !important; }
     .stInfo    { background: rgba(99,102,241,0.07) !important; border: 1px solid rgba(99,102,241,0.18) !important; border-radius: 10px !important; color: #a5b4fc !important; }
 
+    /* ── Chat counter badge ── */
+    .tab-badge {
+        display: inline-flex; align-items: center; gap: 5px;
+    }
+    .badge-count {
+        background: rgba(99,102,241,0.25);
+        color: #a5b4fc;
+        font-size: 0.62rem;
+        font-weight: 700;
+        padding: 1px 6px;
+        border-radius: 999px;
+        border: 1px solid rgba(99,102,241,0.3);
+    }
+    .badge-new {
+        background: rgba(34,197,94,0.2);
+        color: #22c55e;
+        font-size: 0.62rem;
+        font-weight: 700;
+        padding: 1px 6px;
+        border-radius: 999px;
+        border: 1px solid rgba(34,197,94,0.3);
+    }
+
+    /* ── Extraction empty ── */
+    .extract-empty {
+        text-align: center;
+        padding: 3rem 2rem;
+        color: rgba(255,255,255,0.18);
+        font-size: 0.85rem;
+        line-height: 1.7;
+    }
+
     /* ── Footer ── */
     .site-footer {
-        margin-top: 4rem;
-        padding: 2rem 0 1.5rem 0;
-        border-top: 1px solid rgba(255,255,255,0.05);
+        margin-top: 3rem;
+        padding: 1.5rem 0 1rem 0;
+        border-top: 1px solid rgba(255,255,255,0.04);
         text-align: center;
     }
     .footer-text {
-        font-size: 0.78rem;
-        color: rgba(255,255,255,0.2);
+        font-size: 0.75rem;
+        color: rgba(255,255,255,0.18);
         letter-spacing: 0.3px;
         line-height: 1.8;
     }
-    .footer-name {
-        color: rgba(255,255,255,0.35);
-        font-weight: 600;
-    }
+    .footer-name { color: rgba(255,255,255,0.3); font-weight: 600; }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ════════════════════════════════════════════════════════════
 #  CLIENT-SIDE EMBEDDING PIPELINE
-#  All heavy ML work runs in Streamlit — backend stays lean.
 # ════════════════════════════════════════════════════════════
 
 @st.cache_resource(show_spinner="Loading embedding model (BAAI/bge-small-en)…")
 def load_embedding_model():
-    """Load BGE-small once and cache for the lifetime of the Streamlit process."""
     from sentence_transformers import SentenceTransformer
     return SentenceTransformer("BAAI/bge-small-en")
 
-
-# ── Document parsing helpers (mirrors backend/pipeline/ingestor.py) ───────────
 
 SECTION_KEYWORDS = [
     r"pickup", r"pick[\s\-]?up", r"drop[\s\-]?off", r"delivery",
@@ -424,7 +493,7 @@ SECTION_PATTERN = re.compile(
     re.MULTILINE,
 )
 CHARS_PER_TOKEN = 4
-MAX_CHUNKS = 100   # hard cap to keep request size sane
+MAX_CHUNKS = 100
 
 
 def _parse_pdf(file_bytes: bytes) -> str:
@@ -440,7 +509,7 @@ def _parse_pdf(file_bytes: bytes) -> str:
         full = "\n\n".join(pages)
         if len(full.strip()) > 50:
             return full
-        raise ValueError("PyMuPDF returned insufficient text")
+        raise ValueError("Insufficient text from PyMuPDF")
     except Exception:
         import pdfplumber
         pages = []
@@ -480,15 +549,12 @@ def _chunk_text(text: str, chunk_size: int = 600, overlap: int = 100) -> list[di
     chunk_size_chars = chunk_size * CHARS_PER_TOKEN
     overlap_chars = overlap * CHARS_PER_TOKEN
 
-    # Strip page tags, keep page map
     page_map: dict[int, int] = {}
     page_pattern = re.compile(r"\[Page (\d+)\]")
     clean_parts, current_pos = [], 0
-    last_page = 1
     for match in page_pattern.finditer(text):
         clean_parts.append(text[current_pos:match.start()])
-        last_page = int(match.group(1))
-        page_map[sum(len(p) for p in clean_parts)] = last_page
+        page_map[sum(len(p) for p in clean_parts)] = int(match.group(1))
         current_pos = match.end()
     clean_parts.append(text[current_pos:])
     clean_text_no_tags = "".join(clean_parts)
@@ -502,7 +568,6 @@ def _chunk_text(text: str, chunk_size: int = 600, overlap: int = 100) -> list[di
                 break
         return page
 
-    # Section boundaries
     boundaries = [0]
     for m in SECTION_PATTERN.finditer(clean_text_no_tags):
         if m.start() - boundaries[-1] > 200:
@@ -518,11 +583,7 @@ def _chunk_text(text: str, chunk_size: int = 600, overlap: int = 100) -> list[di
     final_chunks, chunk_idx = [], 0
     for section_text, section_start in raw_sections:
         if len(section_text) <= chunk_size_chars:
-            final_chunks.append({
-                "text": section_text,
-                "chunk_index": chunk_idx,
-                "page": get_page(section_start),
-            })
+            final_chunks.append({"text": section_text, "chunk_index": chunk_idx, "page": get_page(section_start)})
             chunk_idx += 1
         else:
             start = 0
@@ -530,17 +591,12 @@ def _chunk_text(text: str, chunk_size: int = 600, overlap: int = 100) -> list[di
                 end = min(start + chunk_size_chars, len(section_text))
                 chunk = section_text[start:end].strip()
                 if chunk:
-                    final_chunks.append({
-                        "text": chunk,
-                        "chunk_index": chunk_idx,
-                        "page": get_page(section_start + start),
-                    })
+                    final_chunks.append({"text": chunk, "chunk_index": chunk_idx, "page": get_page(section_start + start)})
                     chunk_idx += 1
                 if end == len(section_text):
                     break
                 start += chunk_size_chars - overlap_chars
 
-    # Merge tiny chunks
     MIN_CHUNK_CHARS = 150
     merged = []
     for chunk in final_chunks:
@@ -550,20 +606,10 @@ def _chunk_text(text: str, chunk_size: int = 600, overlap: int = 100) -> list[di
             merged.append(chunk)
     for i, c in enumerate(merged):
         c["chunk_index"] = i
-
     return merged
 
 
-def process_document(file_bytes: bytes, filename: str) -> tuple[str, list[dict], np.ndarray]:
-    """
-    Full client-side pipeline:
-      parse → clean → chunk → embed
-
-    Returns:
-        doc_id   : UUID string
-        chunks   : list of {text, page, chunk_index}
-        embeddings: float32 array (N, dim), L2-normalized
-    """
+def process_document(file_bytes: bytes, filename: str):
     suffix = Path(filename).suffix.lower()
     if suffix == ".pdf":
         raw_text = _parse_pdf(file_bytes)
@@ -577,21 +623,16 @@ def process_document(file_bytes: bytes, filename: str) -> tuple[str, list[dict],
     cleaned = _clean_text(raw_text)
     chunks = _chunk_text(cleaned)
 
-    # Cap chunk count to keep request size manageable
     if len(chunks) > MAX_CHUNKS:
         chunks = chunks[:MAX_CHUNKS]
         for i, c in enumerate(chunks):
             c["chunk_index"] = i
 
-    # Embed with passage prefix (BGE instruction format)
     model = load_embedding_model()
     prefixed = [f"passage: {c['text']}" for c in chunks]
     embeddings = model.encode(
-        prefixed,
-        batch_size=32,
-        show_progress_bar=False,
-        convert_to_numpy=True,
-        normalize_embeddings=True,
+        prefixed, batch_size=32, show_progress_bar=False,
+        convert_to_numpy=True, normalize_embeddings=True,
     ).astype(np.float32)
 
     doc_id = str(uuid.uuid4())
@@ -599,24 +640,21 @@ def process_document(file_bytes: bytes, filename: str) -> tuple[str, list[dict],
 
 
 def embed_query(question: str) -> np.ndarray:
-    """Embed a single query with the BGE query prefix."""
     model = load_embedding_model()
-    vec = model.encode(
+    return model.encode(
         [f"query: {question}"],
-        show_progress_bar=False,
-        convert_to_numpy=True,
-        normalize_embeddings=True,
+        show_progress_bar=False, convert_to_numpy=True, normalize_embeddings=True,
     ).astype(np.float32)
-    return vec   # shape (1, dim)
 
 
 # ── Session state defaults ────────────────────────────────────────────────────
 _DEFAULTS = {
-    "doc_id":         None,
-    "filename":       None,
-    "ask_result":     None,
-    "extract_result": None,
-    "backend_url":    os.getenv("BACKEND_URL", "http://localhost:8000"),
+    "doc_id":           None,
+    "filename":         None,
+    "chat_history":     [],        # list of chat turn dicts
+    "extract_result":   None,
+    "active_tab":       0,         # 0 = Chat, 1 = Extraction
+    "backend_url":      os.getenv("BACKEND_URL", "http://localhost:8000"),
 }
 for k, v in _DEFAULTS.items():
     if k not in st.session_state:
@@ -651,9 +689,26 @@ def provider_badge(provider: str) -> str:
     return f'<span class="provider-pill {css}">{icon} {provider}</span>'
 
 
+def conf_badge(score: float) -> str:
+    if score >= 0.70:
+        cls, label = "conf-high", f"{score:.0%} High"
+    elif score >= 0.45:
+        cls, label = "conf-medium", f"{score:.0%} Med"
+    else:
+        cls, label = "conf-low", f"{score:.0%} Low"
+    return f'<span class="chat-conf-badge {cls}">{label}</span>'
+
+
+def fmt_time(iso: str) -> str:
+    try:
+        dt = datetime.datetime.fromisoformat(iso)
+        return dt.strftime("%H:%M")
+    except Exception:
+        return ""
+
+
 # ── Backend status ────────────────────────────────────────────────────────────
 alive, alive_detail = backend_check()
-
 
 # ── Header ───────────────────────────────────────────────────────────────────
 dot        = '<span class="dot-green"></span>' if alive else '<span class="dot-red"></span>'
@@ -671,14 +726,11 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-
 # ── Offline warning ───────────────────────────────────────────────────────────
 if not alive:
     st.markdown(f"""
 <div class="card-warning">
-  <div style="font-size:0.9rem;color:#fde68a;font-weight:600;margin-bottom:6px">
-    Backend Offline
-  </div>
+  <div style="font-size:0.9rem;color:#fde68a;font-weight:600;margin-bottom:6px">Backend Offline</div>
   <div style="font-size:0.82rem;color:rgba(255,255,255,0.5);line-height:1.8">
     <b>Detail:</b> {alive_detail}<br><br>
     <b>Start the backend:</b><br>
@@ -689,11 +741,11 @@ if not alive:
 
 
 # ── Two-column layout ─────────────────────────────────────────────────────────
-left_col, right_col = st.columns([1, 1.55], gap="large")
+left_col, right_col = st.columns([1, 1.65], gap="large")
 
 
 # ════════════════════════════════════════════════════════════
-#  LEFT PANEL — Document upload + Query + Extract
+#  LEFT PANEL — Upload · Ask · Extract
 # ════════════════════════════════════════════════════════════
 with left_col:
 
@@ -709,40 +761,30 @@ with left_col:
     )
 
     if uploaded_file and st.session_state.filename != uploaded_file.name:
-        with st.spinner(f"Parsing & embedding **{uploaded_file.name}** (client-side)…"):
+        with st.spinner(f"Parsing & embedding **{uploaded_file.name}**…"):
             try:
                 file_bytes = uploaded_file.getvalue()
+                doc_id, chunks, embeddings = process_document(file_bytes, uploaded_file.name)
 
-                # ── Client-side: parse → chunk → embed ────────────────────────
-                doc_id, chunks, embeddings = process_document(
-                    file_bytes, uploaded_file.name
-                )
-
-                # ── POST to backend: store FAISS index ────────────────────────
                 payload = {
                     "doc_id":     doc_id,
                     "filename":   uploaded_file.name,
                     "chunks":     chunks,
                     "embeddings": embeddings.tolist(),
                 }
-                resp = requests.post(
-                    f"{get_url()}/upload_embeddings",
-                    json=payload,
-                    timeout=120,
-                )
+                resp = requests.post(f"{get_url()}/upload_embeddings", json=payload, timeout=120)
 
                 if resp.status_code == 200:
                     data = resp.json()
                     st.session_state.doc_id         = data["doc_id"]
                     st.session_state.filename       = uploaded_file.name
-                    st.session_state.ask_result     = None
+                    # Clear history when new doc is uploaded
+                    st.session_state.chat_history   = []
                     st.session_state.extract_result = None
-                    st.success(
-                        f"**{uploaded_file.name}** — {data['chunks_count']} chunks embedded & indexed"
-                    )
+                    st.session_state.active_tab     = 0
+                    st.success(f"**{uploaded_file.name}** — {data['chunks_count']} chunks indexed")
                 else:
                     st.error(f"Upload failed: {resp.json().get('detail', resp.text)}")
-
             except requests.exceptions.ConnectionError:
                 st.error(f"Cannot reach backend at {get_url()}.")
             except Exception as e:
@@ -764,13 +806,13 @@ with left_col:
 
     no_doc = st.session_state.doc_id is None or not alive
 
-    with st.form(key="ask_form", clear_on_submit=False):
+    with st.form(key="ask_form", clear_on_submit=True):
         question = st.text_area(
             "Question",
             placeholder="e.g. Who is the consignee?\nWhat is the freight rate?",
             disabled=no_doc,
             label_visibility="collapsed",
-            height=110,
+            height=100,
         )
         ask_btn = st.form_submit_button(
             "Search Document",
@@ -779,9 +821,8 @@ with left_col:
             type="primary",
         )
 
-    # Allow Enter to submit
-    components.html(
-        """
+    # Enter to submit
+    components.html("""
         <script>
         const doc = window.parent.document;
         const textareas = doc.querySelectorAll('textarea');
@@ -797,18 +838,12 @@ with left_col:
             });
         });
         </script>
-        """,
-        height=0,
-        width=0,
-    )
+    """, height=0, width=0)
 
     if ask_btn and question.strip():
         with st.spinner("Embedding query & retrieving answer…"):
             try:
-                # ── Client-side: embed the query ──────────────────────────────
                 query_vec = embed_query(question.strip())
-
-                # ── POST to backend: FAISS search + LLM ──────────────────────
                 resp = requests.post(
                     f"{get_url()}/ask",
                     json={
@@ -819,8 +854,19 @@ with left_col:
                     timeout=90,
                 )
                 if resp.status_code == 200:
-                    st.session_state.ask_result     = resp.json()
-                    st.session_state.extract_result = None
+                    result = resp.json()
+                    # Append to persistent chat history
+                    st.session_state.chat_history.append({
+                        "question":           question.strip(),
+                        "answer":             result.get("answer", ""),
+                        "confidence":         result.get("confidence", 0.0),
+                        "sources":            result.get("sources", []),
+                        "provider":           result.get("provider", "None"),
+                        "logs":               result.get("logs", []),
+                        "guardrail_triggered": result.get("guardrail_triggered", False),
+                        "timestamp":          datetime.datetime.now().isoformat(),
+                    })
+                    st.session_state.active_tab = 0   # stay on Chat tab
                 else:
                     st.error(f"Error: {resp.json().get('detail', resp.text)}")
             except requests.exceptions.ConnectionError:
@@ -830,12 +876,11 @@ with left_col:
 
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
-    # ── Extract ───────────────────────────────────────────────────────────────
+    # ── Structured Extraction ─────────────────────────────────────────────────
     st.markdown('<div class="section-label">Structured Extraction</div>', unsafe_allow_html=True)
-
     st.markdown(
-        '<div style="font-size:0.82rem;color:rgba(255,255,255,0.3);margin-bottom:0.75rem;line-height:1.6">'
-        'Automatically extract key shipment fields using hybrid regex + LLM analysis.'
+        '<div style="font-size:0.8rem;color:rgba(255,255,255,0.28);margin-bottom:0.7rem;line-height:1.6">'
+        'Extract key shipment fields using hybrid regex + LLM analysis.'
         '</div>',
         unsafe_allow_html=True,
     )
@@ -856,7 +901,7 @@ with left_col:
                 )
                 if resp.status_code == 200:
                     st.session_state.extract_result = resp.json()
-                    st.session_state.ask_result     = None
+                    st.session_state.active_tab     = 1   # switch to Extraction tab
                 else:
                     st.error(f"Error: {resp.json().get('detail', resp.text)}")
             except requests.exceptions.ConnectionError:
@@ -864,100 +909,154 @@ with left_col:
             except Exception as e:
                 st.error(f"Error: {e}")
 
-    # ── How it works ─────────────────────────────────────────────────────────
+    # ── How it works ──────────────────────────────────────────────────────────
     if not st.session_state.doc_id:
         st.markdown("""
-<div class="card" style="margin-top:1.5rem">
-  <div style="font-size:0.8rem;color:rgba(255,255,255,0.45);font-weight:600;margin-bottom:0.65rem;letter-spacing:0.3px">How it works</div>
-  <div style="font-size:0.8rem;color:rgba(255,255,255,0.28);line-height:2;letter-spacing:0.1px">
+<div class="card" style="margin-top:1.25rem">
+  <div style="font-size:0.78rem;color:rgba(255,255,255,0.4);font-weight:600;margin-bottom:0.6rem">How it works</div>
+  <div style="font-size:0.78rem;color:rgba(255,255,255,0.25);line-height:2">
     1. Upload a PDF, DOCX, or TXT logistics document<br>
-    2. Document is parsed &amp; embedded here in your browser session<br>
-    3. Embeddings sent to backend for FAISS storage<br>
-    4. Ask questions — query is embedded here, answer retrieved via LLM<br><br>
-    <span style="color:rgba(255,255,255,0.2)">Supports: Bill of Lading · Rate Confirmation · Carrier RC · Invoices</span>
+    2. Document is parsed &amp; embedded in your session<br>
+    3. Ask any number of questions — full chat history is kept<br>
+    4. Run structured extraction at any time — chat stays intact<br><br>
+    <span style="color:rgba(255,255,255,0.18)">Supports: Bill of Lading · Rate Confirmation · Carrier RC</span>
   </div>
 </div>
 """, unsafe_allow_html=True)
 
+    # ── Clear Chat button (only when there's history) ─────────────────────────
+    if st.session_state.chat_history:
+        st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+        if st.button("🗑 Clear Chat History", use_container_width=True):
+            st.session_state.chat_history = []
+            st.session_state.active_tab   = 0
+            st.rerun()
+
 
 # ════════════════════════════════════════════════════════════
-#  RIGHT PANEL — Results
+#  RIGHT PANEL — Tabbed: Chat History | Extraction Results
 # ════════════════════════════════════════════════════════════
 with right_col:
 
-    # ── Ask Result ────────────────────────────────────────────────────────────
-    if st.session_state.ask_result:
-        result = st.session_state.ask_result
+    n_msgs     = len(st.session_state.chat_history)
+    has_extract = st.session_state.extract_result is not None
 
-        score    = result.get("confidence", 0.0)
-        provider = result.get("provider", "None")
-        sources  = result.get("sources", [])
+    # Build tab labels with live counts
+    chat_label    = f"💬 Chat  ({n_msgs})" if n_msgs else "💬 Chat"
+    extract_label = f"📋 Extraction  ✓" if has_extract else "📋 Extraction"
 
-        st.markdown(f"""
-<div class="stats-grid">
-  <div class="stat-box">
-    <div class="stat-val" style="color:{'#22c55e' if score>=0.7 else '#f59e0b' if score>=0.45 else '#ef4444'}">{score:.0%}</div>
-    <div class="stat-key">Confidence</div>
+    tab_chat, tab_extract = st.tabs([chat_label, extract_label])
+
+
+    # ── TAB 1: Chat History ───────────────────────────────────────────────────
+    with tab_chat:
+
+        if not st.session_state.chat_history:
+            st.markdown("""
+<div class="chat-empty">
+  <div class="chat-empty-icon">💬</div>
+  <div class="chat-empty-text">
+    No questions yet.<br>Upload a document and start asking questions —<br>your full conversation will appear here.
   </div>
-  <div class="stat-box">
-    <div style="margin-top:4px">{provider_badge(provider)}</div>
-    <div class="stat-key" style="margin-top:6px">LLM Provider</div>
-  </div>
-  <div class="stat-box">
-    <div class="stat-val">{len(sources)}</div>
-    <div class="stat-key">Chunks Retrieved</div>
+</div>
+""", unsafe_allow_html=True)
+        else:
+            for i, turn in enumerate(st.session_state.chat_history):
+                q         = turn["question"]
+                a         = turn["answer"]
+                conf      = turn["confidence"]
+                provider  = turn["provider"]
+                sources   = turn["sources"]
+                logs      = turn["logs"]
+                guardrail = turn["guardrail_triggered"]
+                ts        = fmt_time(turn.get("timestamp", ""))
+
+                # ── Question bubble ───────────────────────────────────────────
+                st.markdown(f"""
+<div class="chat-question-row">
+  <div class="chat-question-bubble">{q}</div>
+</div>
+""", unsafe_allow_html=True)
+
+                # ── Answer bubble ─────────────────────────────────────────────
+                if guardrail:
+                    bubble_class = "chat-answer-guardrail"
+                    icon = "⚠️ "
+                else:
+                    bubble_class = "chat-answer-bubble"
+                    icon = ""
+
+                meta_html = f"""
+<div class="chat-meta">
+  <span class="chat-timestamp">{ts}</span>
+  {conf_badge(conf)}
+  {provider_badge(provider)}
+</div>
+"""
+                st.markdown(f"""
+<div class="chat-answer-row">
+  <div class="{bubble_class}">
+    {icon}{a}
+    {meta_html}
   </div>
 </div>
 """, unsafe_allow_html=True)
 
-        st.markdown('<div class="section-label">Answer</div>', unsafe_allow_html=True)
+                # ── Expandable sources + logs ─────────────────────────────────
+                if sources or logs:
+                    with st.expander(
+                        f"Sources ({len(sources)})  ·  Msg #{i + 1}",
+                        expanded=False,
+                    ):
+                        for src in sources:
+                            page_info = f"Page {src['page']}" if src.get("page") else "—"
+                            st.markdown(
+                                f'<div class="source-chunk">'
+                                f'<div class="chunk-meta">Chunk #{src["chunk_index"]} · {page_info} · {src["similarity"]:.0%} similarity</div>'
+                                f'{src["text"][:500]}{"…" if len(src["text"]) > 500 else ""}'
+                                f'</div>',
+                                unsafe_allow_html=True,
+                            )
+                        if logs:
+                            st.markdown(
+                                '<div style="margin-top:0.5rem;margin-bottom:0.25rem;font-size:0.65rem;'
+                                'color:rgba(255,255,255,0.2);letter-spacing:1px;text-transform:uppercase">Logs</div>',
+                                unsafe_allow_html=True,
+                            )
+                            for log in logs:
+                                st.markdown(f'<div class="log-line">{log}</div>', unsafe_allow_html=True)
 
-        if result.get("guardrail_triggered"):
-            st.markdown(
-                f'<div class="guardrail-alert">Guardrail triggered — {result["answer"]}</div>',
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                f'<div class="card-highlight">'
-                f'<div class="answer-label">Response</div>'
-                f'<div class="answer-text">{result["answer"]}</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-
-        st.progress(score)
-
-        if sources:
-            with st.expander(f"Source Chunks  ·  {len(sources)} retrieved", expanded=False):
-                for src in sources:
-                    page_info = f"Page {src['page']}" if src.get("page") else "—"
+                # Thin divider between turns (skip after last)
+                if i < len(st.session_state.chat_history) - 1:
                     st.markdown(
-                        f'<div class="source-chunk">'
-                        f'<div class="chunk-meta">Chunk #{src["chunk_index"]} · {page_info} · Similarity {src["similarity"]:.0%}</div>'
-                        f'{src["text"][:520]}{"…" if len(src["text"]) > 520 else ""}'
-                        f'</div>',
+                        '<hr style="border-color:rgba(255,255,255,0.04);margin:0.25rem 0 1rem 0">',
                         unsafe_allow_html=True,
                     )
 
-        logs = result.get("logs", [])
-        if logs:
-            with st.expander("System Logs", expanded=False):
-                for log in logs:
-                    st.markdown(f'<div class="log-line">{log}</div>', unsafe_allow_html=True)
 
+    # ── TAB 2: Extraction Results ─────────────────────────────────────────────
+    with tab_extract:
 
-    # ── Extract Result ────────────────────────────────────────────────────────
-    if st.session_state.extract_result:
-        extract = st.session_state.extract_result
-        data    = extract.get("data", {})
+        if not has_extract:
+            st.markdown("""
+<div class="extract-empty">
+  <div style="font-size:2rem;opacity:0.25;margin-bottom:0.75rem">📋</div>
+  Click <b>Extract Shipment Data</b> in the left panel<br>
+  to automatically pull key shipment fields from the document.<br><br>
+  <span style="color:rgba(255,255,255,0.12)">Chat history is preserved while you run extraction.</span>
+</div>
+""", unsafe_allow_html=True)
 
-        non_null     = sum(1 for v in data.values() if v is not None)
-        total        = len(data)
-        completeness = non_null / total if total else 0
-        provider     = extract.get("provider", "None")
+        else:
+            extract      = st.session_state.extract_result
+            data         = extract.get("data", {})
+            provider     = extract.get("provider", "None")
+            ext_logs     = extract.get("logs", [])
+            non_null     = sum(1 for v in data.values() if v is not None)
+            total        = len(data)
+            completeness = non_null / total if total else 0
 
-        st.markdown(f"""
+            st.markdown(f"""
 <div class="stats-grid">
   <div class="stat-box">
     <div class="stat-val" style="color:{'#22c55e' if completeness>=0.7 else '#f59e0b' if completeness>=0.45 else '#ef4444'}">{completeness:.0%}</div>
@@ -974,65 +1073,51 @@ with right_col:
 </div>
 """, unsafe_allow_html=True)
 
-        st.progress(completeness)
-        st.markdown('<div class="section-label">Extracted Fields</div>', unsafe_allow_html=True)
+            st.progress(completeness)
+            st.markdown('<div class="section-label" style="margin-top:0.5rem">Extracted Fields</div>', unsafe_allow_html=True)
 
-        FIELD_LABELS = {
-            "shipment_id":       "Shipment / BOL ID",
-            "shipper":           "Shipper",
-            "consignee":         "Consignee",
-            "pickup_datetime":   "Pickup Date / Time",
-            "delivery_datetime": "Delivery Date / Time",
-            "equipment_type":    "Equipment Type",
-            "mode":              "Mode",
-            "rate":              "Rate",
-            "currency":          "Currency",
-            "weight":            "Weight",
-            "carrier_name":      "Carrier Name",
-        }
+            FIELD_LABELS = {
+                "shipment_id":       "Shipment / BOL ID",
+                "shipper":           "Shipper",
+                "consignee":         "Consignee",
+                "pickup_datetime":   "Pickup Date / Time",
+                "delivery_datetime": "Delivery Date / Time",
+                "equipment_type":    "Equipment Type",
+                "mode":              "Mode",
+                "rate":              "Rate",
+                "currency":          "Currency",
+                "weight":            "Weight",
+                "carrier_name":      "Carrier Name",
+            }
 
-        rows_html = ""
-        for field, label in FIELD_LABELS.items():
-            val = data.get(field)
-            if val is not None:
-                display = f"${val:,.2f}" if field == "rate" and isinstance(val, (int, float)) else str(val)
-                rows_html += (
-                    f'<div class="field-row">'
-                    f'<span class="field-name">{label}</span>'
-                    f'<span class="field-value">{display}</span>'
-                    f'</div>'
-                )
-            else:
-                rows_html += (
-                    f'<div class="field-row">'
-                    f'<span class="field-name">{label}</span>'
-                    f'<span class="field-null">not found</span>'
-                    f'</div>'
-                )
+            rows_html = ""
+            for field, label in FIELD_LABELS.items():
+                val = data.get(field)
+                if val is not None:
+                    display = f"${val:,.2f}" if field == "rate" and isinstance(val, (int, float)) else str(val)
+                    rows_html += (
+                        f'<div class="field-row">'
+                        f'<span class="field-name">{label}</span>'
+                        f'<span class="field-value">{display}</span>'
+                        f'</div>'
+                    )
+                else:
+                    rows_html += (
+                        f'<div class="field-row">'
+                        f'<span class="field-name">{label}</span>'
+                        f'<span class="field-null">not found</span>'
+                        f'</div>'
+                    )
 
-        st.markdown(f'<div class="card">{rows_html}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="card">{rows_html}</div>', unsafe_allow_html=True)
 
-        with st.expander("Raw JSON", expanded=False):
-            st.json(data)
+            with st.expander("Raw JSON", expanded=False):
+                st.json(data)
 
-        ext_logs = extract.get("logs", [])
-        if ext_logs:
-            with st.expander("Extraction Logs", expanded=False):
-                for log in ext_logs:
-                    st.markdown(f'<div class="log-line">{log}</div>', unsafe_allow_html=True)
-
-
-    # ── Placeholder ───────────────────────────────────────────────────────────
-    if not st.session_state.ask_result and not st.session_state.extract_result:
-        st.markdown("""
-<div class="placeholder-card">
-  <div class="placeholder-icon">&#x2B21;</div>
-  <div class="placeholder-text">
-    Upload a document and ask a question,<br>or run structured extraction to see results here.<br><br>
-    <span style="font-size:0.78rem;opacity:0.55">Bill of Lading · Rate Confirmation · Carrier RC</span>
-  </div>
-</div>
-""", unsafe_allow_html=True)
+            if ext_logs:
+                with st.expander("Extraction Logs", expanded=False):
+                    for log in ext_logs:
+                        st.markdown(f'<div class="log-line">{log}</div>', unsafe_allow_html=True)
 
 
 # ── Footer ────────────────────────────────────────────────────────────────────
