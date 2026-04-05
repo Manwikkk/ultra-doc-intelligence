@@ -1,261 +1,394 @@
-# 🚛 Ultra Doc-Intelligence
+<div align="center">
 
-> **AI-powered document intelligence assistant for Transportation Management Systems (TMS)**  
-> Upload logistics documents — query them with natural language — extract structured shipment data.
+<img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&weight=700&size=36&duration=3000&pause=1500&color=6366F1&center=true&vCenter=true&width=700&height=80&lines=Ultra+Doc-Intelligence;AI+Document+Analysis;Built+for+TMS+Professionals" alt="Ultra Doc-Intelligence" />
+
+<br/>
+
+[![Live App](https://img.shields.io/badge/Live%20App-ultraship--doc--intelligence.streamlit.app-6366f1?style=for-the-badge&logo=streamlit&logoColor=white)](https://ultraship-doc-intelligence.streamlit.app/)
+[![Backend](https://img.shields.io/badge/Backend-Render%20Free%20Tier-00d4aa?style=for-the-badge&logo=render&logoColor=white)](https://render.com)
+[![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.111-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+
+<br/>
+
+> **AI-powered document intelligence for Transportation Management Systems.**  
+> Upload logistics documents — query with natural language — extract structured shipment data.
+
+<br/>
 
 ---
 
-## 🏗️ Architecture
+</div>
+
+## ── What It Does
+
+Ultra Doc-Intelligence is a production-grade RAG (Retrieval-Augmented Generation) system specifically tuned for logistics documents — **Bills of Lading**, **Rate Confirmations**, and **Carrier RCs**.
+
+| Capability | Description |
+|---|---|
+| **Natural Language Q&A** | Ask questions like *"Who is the consignee?"* against any uploaded document |
+| **Structured Extraction** | Automatically extracts 11 shipment fields (shipper, rate, equipment, dates…) |
+| **Confidence Scoring** | Every answer is scored with a weighted similarity model |
+| **Guardrails** | 4-stage hallucination prevention pipeline blocks low-quality answers |
+| **Multi-LLM Fallback** | Routes through Groq → OpenAI → Gemini → Ollama automatically |
+| **Persistent Chat** | Full conversation history preserved across all questions |
+
+---
+
+## ── Deployment Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                  Streamlit Frontend  (heavy ML here)              │
-│                                                                    │
-│  upload()                                                          │
-│  ├── Parse PDF/DOCX/TXT                                           │
-│  ├── Clean + chunk text (section-aware sliding window)            │
-│  ├── BGE-small-en.encode(passages, normalize=True)  ◄── PyTorch  │
-│  └── POST /upload_embeddings  { chunks, embeddings }              │
-│                                                                    │
-│  ask()                                                             │
-│  ├── BGE-small-en.encode("query: …", normalize=True)             │
-│  └── POST /ask  { doc_id, question, query_embedding }             │
-└──────────────────────────┬───────────────────────────────────────┘
-                           │ JSON (float32 embeddings)
-┌──────────────────────────▼───────────────────────────────────────┐
-│              FastAPI Backend  (no PyTorch — ~50 MB RAM)           │
-│                                                                    │
-│  POST /upload_embeddings                                           │
+┌─────────────────────────────────────────────────────────────────────┐
+│             STREAMLIT CLOUD  (ultraship-doc-intelligence.streamlit.app)  │
+│                           frontend/app.py                           │
+│                                                                     │
+│  upload()                                                           │
+│  ├── Parse PDF / DOCX / TXT  (PyMuPDF + pdfplumber + python-docx)  │
+│  ├── Section-aware chunking  (regex boundary detection)             │
+│  ├── BAAI/bge-small-en.encode(passages, normalize=True)  ◄─PyTorch │
+│  └── POST /upload_embeddings  { chunks[], embeddings[] }   ──────┐  │
+│                                                                   │  │
+│  ask()                                                            │  │
+│  ├── BAAI/bge-small-en.encode("query: …", normalize=True)        │  │
+│  └── POST /ask  { doc_id, question, query_embedding }  ───────┐  │  │
+└───────────────────────────────────────────────────────────────┼──┼──┘
+                              HTTPS JSON  ◄─────────────────────┘  │
+┌─────────────────────────────────────────────────────────────────┐ │
+│             RENDER FREE TIER  (~50 MB RAM — no PyTorch)         │ │
+│                           backend/main.py                       │ │
+│                                                                 │ │
+│  POST /upload_embeddings  ◄─────────────────────────────────────┘ │
 │  ├── np.array(embeddings, dtype=float32)                          │
-│  └── FAISS IndexFlatIP  →  storage/{doc_id}/                      │
-│                                                                    │
-│  POST /ask                                                         │
-│  ├── FAISS search (client embedding)                               │
-│  ├── Guardrails (similarity + grounding + confidence)             │
-│  └── LLM Router: Groq → OpenAI → Gemini → Ollama                 │
-│                                                                    │
-│  POST /extract  (regex + LLM hybrid, no embeddings)               │
-└──────────────────────────────────────────────────────────────────┘
+│  └── FAISS IndexFlatIP  →  storage/{doc_id}/                     │
+│                                                                   │
+│  POST /ask  ◄─────────────────────────────────────────────────────┘
+│  ├── FAISS search  (pre-computed query vector from client)
+│  ├── Guardrails  (similarity + grounding + confidence)
+│  └── LLM Router: Groq → OpenAI → Gemini → Ollama
+│
+│  POST /extract  (regex + LLM hybrid, no embeddings needed)
+│  GET  /health   GET  /documents
+└────────────────────────────────────────────────────────────────────
 ```
+
+> **Why this split?** Loading `sentence-transformers` (PyTorch) requires ~400–600 MB RAM.  
+> Render's free tier gives 512 MB total. By moving all embedding to Streamlit Cloud,  
+> the backend stays under **~80 MB RAM** and runs reliably for free.
 
 ---
 
-## ⚡ Quick Start
+## ── Live App
 
-### 1. Clone & set up environment
+| Service | Platform | URL |
+|---|---|---|
+| **Frontend** | Streamlit Cloud | [ultraship-doc-intelligence.streamlit.app](https://ultraship-doc-intelligence.streamlit.app/) |
+| **Backend API** | Render Free Tier | Configured via `BACKEND_URL` secret in Streamlit Cloud |
+| **API Docs** | FastAPI Swagger | `<your-render-url>/docs` |
+
+---
+
+## ── Running Locally
+
+### Prerequisites
+
+- Python 3.11+
+- At least one LLM API key (Groq is recommended — it's free)
+- Git
+
+### 1 — Clone the repo
 
 ```bash
-cd "Ultra Doc-Intelligence/backend"
-python -m venv venv
-venv\Scripts\activate          # Windows
-pip install -r requirements.txt
+git clone https://github.com/Manwikkk/ultra-doc-intelligence.git
+cd ultra-doc-intelligence
 ```
 
-### 2. Configure API keys
-
-```bash
-cp .env.example .env
-# Edit .env and add your API keys
-```
-
-### 3. Start FastAPI backend
+### 2 — Start the Backend
 
 ```bash
 cd backend
-uvicorn main:app --reload --port 8000
+python -m venv venv
+venv\Scripts\activate          # Windows
+# source venv/bin/activate     # macOS / Linux
+
+pip install -r requirements.txt
+
+cp .env.example .env
+# Open .env and add your API key(s) — at least GROQ_API_KEY is required
 ```
 
-### 4. Start Streamlit frontend
+Edit `.env`:
+
+```env
+GROQ_API_KEY=gsk_your_key_here
+GROQ_MODEL=llama-3.3-70b-versatile
+```
+
+Start the server:
+
+```bash
+uvicorn main:app --reload --host 127.0.0.1 --port 8000
+```
+
+Verify it's running:
+
+```bash
+curl http://localhost:8000/health
+# {"status":"ok","embedding_location":"client-side (Streamlit)","embedding_model":"BAAI/bge-small-en",...}
+```
+
+### 3 — Start the Frontend
+
+Open a **new terminal** (keep the backend running):
 
 ```bash
 cd frontend
 pip install -r requirements.txt
+
+# Point the frontend at your LOCAL backend:
+set BACKEND_URL=http://localhost:8000        # Windows CMD
+# $env:BACKEND_URL="http://localhost:8000"  # Windows PowerShell
+# export BACKEND_URL=http://localhost:8000  # macOS / Linux
+
 streamlit run app.py
 ```
 
-### 5. Open the app
+### 4 — Open the App
 
-- **UI**: http://localhost:8501  
-- **API Docs**: http://localhost:8000/docs
+- **UI**: [http://localhost:8501](http://localhost:8501)
+- **API Docs**: [http://localhost:8000/docs](http://localhost:8000/docs)
+
+> On first run, Streamlit downloads `BAAI/bge-small-en` (~130 MB). This is cached for all future sessions.
 
 ---
 
-## 📂 Project Structure
+## ── Deployment Guide
+
+### Frontend — Streamlit Cloud
+
+1. Push your code to GitHub.
+2. Go to [share.streamlit.io](https://share.streamlit.io) and connect your repo.
+3. Set **Main file path** to `frontend/app.py`.
+4. Under **Advanced settings → Secrets**, add:
+   ```toml
+   BACKEND_URL = "https://your-render-app.onrender.com"
+   ```
+5. Deploy. Streamlit handles the `frontend/requirements.txt` automatically.
+
+### Backend — Render
+
+1. Create a new **Web Service** on [render.com](https://render.com).
+2. Connect your GitHub repo.
+3. Set:
+   - **Root Directory**: `backend`
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+   - **Plan**: Free
+4. Add **Environment Variables** in Render dashboard:
+
+   | Key | Value |
+   |---|---|
+   | `GROQ_API_KEY` | `gsk_...` |
+   | `GROQ_MODEL` | `llama-3.3-70b-versatile` |
+   | `OPENAI_API_KEY` | *(optional)* |
+   | `GEMINI_API_KEY` | *(optional)* |
+   | `SIMILARITY_THRESHOLD` | `0.35` |
+   | `CONFIDENCE_THRESHOLD` | `0.30` |
+   | `TOP_K` | `5` |
+
+5. Deploy. The Render URL (e.g. `https://ultra-doc.onrender.com`) is what you add to Streamlit Cloud as `BACKEND_URL`.
+
+> **Note:** Render free tier spins down after inactivity. The first request after sleep takes ~30–60 seconds.
+
+---
+
+## ── Project Structure
 
 ```
-Ultra Doc-Intelligence/
+ultra-doc-intelligence/
 ├── backend/
-│   ├── main.py                  # FastAPI app — /upload_embeddings, /ask, /extract
-│   ├── config.py                # Settings (pydantic-settings)
-│   ├── models.py                # Pydantic schemas (v2: UploadEmbeddingsRequest + query_embedding)
-│   ├── pipeline/
-│   │   ├── embedder.py          # Stub only — normalization helper, no model loading
-│   │   ├── vector_store.py      # FAISS index management
-│   │   ├── retriever.py         # Similarity retrieval (accepts pre-computed vector)
-│   │   ├── guardrails.py        # Hallucination prevention
-│   │   ├── confidence.py        # Confidence scoring
-│   │   ├── llm_router.py        # Multi-provider LLM fallback
-│   │   ├── ingestor.py          # (kept for /extract raw text reading)
-│   │   └── extractor.py         # Structured data extraction
-│   ├── storage/                 # FAISS indexes (auto-created)
-│   └── requirements.txt         # No sentence-transformers / PyTorch
+│   ├── main.py                  # FastAPI — /upload_embeddings, /ask, /extract, /health
+│   ├── config.py                # Pydantic-settings — reads from .env
+│   ├── models.py                # Pydantic v2 request/response schemas
+│   ├── .env.example             # Template — copy to .env and fill keys
+│   ├── requirements.txt         # No sentence-transformers / PyTorch
+│   └── pipeline/
+│       ├── embedder.py          # Normalization helper only (no model loading)
+│       ├── vector_store.py      # FAISS IndexFlatIP read/write per document
+│       ├── retriever.py         # Top-K similarity retrieval from stored index
+│       ├── guardrails.py        # 4-stage hallucination prevention
+│       ├── confidence.py        # Weighted confidence scorer
+│       ├── llm_router.py        # Multi-provider LLM fallback chain
+│       ├── ingestor.py          # Raw text reader (used by /extract)
+│       └── extractor.py        # Hybrid regex + LLM structured extraction
+│
 ├── frontend/
-│   ├── app.py                   # Streamlit UI + full embedding pipeline
-│   └── requirements.txt         # sentence-transformers + parsers live here
-├── .env.example
+│   ├── app.py                   # Streamlit UI + full embedding pipeline (client-side)
+│   ├── requirements.txt         # sentence-transformers + parsers live here
+│   └── Document.png             # App favicon
+│
+├── .devcontainer/
+│   └── devcontainer.json        # GitHub Codespaces config
 ├── .gitignore
+├── .python-version              # 3.11
 └── README.md
 ```
 
 ---
 
-## 🔍 Chunking Strategy
+## ── Environment Variables
 
-**Algorithm**: Semantic-boundary-aware sliding window
+### Backend (`.env` / Render dashboard)
 
-1. **Section detection**: Scans for TMS-domain section headers (Pickup, Drop, Consignee, Rate Breakdown, Special Instructions, Bill of Lading, etc.) using regex
-2. **Section split**: Text is split at detected section boundaries first — preserving semantic coherence
-3. **Sliding window within oversized sections**: For sections exceeding ~2400 chars (600 tokens × 4 chars/token), a sliding window with 100-token overlap is applied
-4. **Tiny chunk merging**: Chunks under 150 chars are merged into the previous chunk
-5. **Page tracking**: Each chunk retains its page number for source citations
+| Variable | Default | Description |
+|---|---|---|
+| `GROQ_API_KEY` | — | **Required.** Groq API key (primary LLM) |
+| `OPENAI_API_KEY` | — | Optional fallback |
+| `GEMINI_API_KEY` | — | Optional fallback |
+| `GROQ_MODEL` | `llama-3.3-70b-versatile` | Groq model name |
+| `OPENAI_MODEL` | `gpt-3.5-turbo` | OpenAI model |
+| `GEMINI_MODEL` | `gemini-1.5-flash` | Gemini model |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Local Ollama server |
+| `OLLAMA_MODEL` | `llama3` | Ollama model name |
+| `STORAGE_DIR` | `./storage` | FAISS index storage path |
+| `TOP_K` | `5` | Chunks retrieved per query |
+| `SIMILARITY_THRESHOLD` | `0.35` | Min cosine similarity (tuned for TMS docs) |
+| `CONFIDENCE_THRESHOLD` | `0.30` | Min confidence to return an answer |
+| `LLM_TIMEOUT` | `60` | API call timeout in seconds |
 
-**Parameters** (configurable via `.env`):
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `CHUNK_SIZE` | 600 tokens | Target chunk size |
-| `CHUNK_OVERLAP` | 100 tokens | Sliding overlap |
+### Frontend (Streamlit Cloud Secrets / local shell)
 
----
-
-## 🔎 Retrieval Method
-
-- **Index type**: `faiss.IndexFlatIP` (inner product = exact cosine similarity on L2-normalized vectors)
-- **Per-document isolation**: Each document gets its own FAISS index stored at `storage/{doc_id}/`
-- **Query embedding**: `"query: <user question>"` prefix (bge instruction format)
-- **Passage embedding**: `"passage: <chunk text>"` prefix
-- **Top-K**: 4 chunks retrieved per query (configurable)
-- **Similarity metric**: Cosine similarity via inner product of L2-normalized vectors
-
----
-
-## 🔒 Guardrails
-
-Four guardrails applied in sequence to prevent hallucinations:
-
-| # | Guardrail | When | Action |
-|---|-----------|------|--------|
-| 1 | **Empty context** | Pre-LLM | Return "Not found" if 0 chunks retrieved |
-| 2 | **Similarity threshold** | Pre-LLM | Return "Not found" if max similarity < 0.35 |
-| 3 | **Answer grounding** | Post-LLM | Check if ≥25% of answer keywords exist in context |
-| 4 | **Confidence refusal** | Post-scoring | Return "Not found" if confidence score < 0.30 |
-
-**Pre-LLM checks** save API calls when there's clearly no relevant content.  
-**Post-LLM checks** catch cases where the LLM may have generated information beyond the context.
+| Variable | Default | Description |
+|---|---|---|
+| `BACKEND_URL` | `http://localhost:8000` | Points to the FastAPI backend |
 
 ---
 
-## 📊 Confidence Scoring
+## ── Chunking Strategy
+
+**Algorithm**: Section-aware sliding window — purpose-built for TMS document structure.
+
+1. **Section detection** — Scans for logistics domain headers (`pickup`, `consignee`, `bill of lading`, `rate breakdown`, etc.) using compiled regex
+2. **Section-first split** — Text is divided at boundary lines to preserve semantic coherence
+3. **Sliding window** for oversized sections (> 2400 chars / ~600 tokens) with 100-token overlap
+4. **Tiny chunk merging** — Chunks under 150 chars merged into the previous chunk
+5. **Page attribution** — Every chunk retains its source page number for citations
+
+---
+
+## ── Retrieval
+
+| Property | Value |
+|---|---|
+| Index type | `faiss.IndexFlatIP` (exact cosine via inner product) |
+| Normalization | L2-normalized on both sides — IP = cosine similarity |
+| Document isolation | Each doc gets its own `storage/{doc_id}/` FAISS index |
+| Query prefix | `"query: <question>"` (BGE instruction format) |
+| Passage prefix | `"passage: <chunk>"` |
+| Top-K | 5 chunks per query (configurable) |
+
+---
+
+## ── Guardrails
+
+Four sequential checks prevent hallucinations and low-quality answers:
+
+| # | Stage | When | Trigger | Action |
+|---|---|---|---|---|
+| 1 | Empty context | Pre-LLM | 0 chunks retrieved | Return "not found" immediately |
+| 2 | Similarity threshold | Pre-LLM | Max similarity < 0.35 | Return "not found" — saves LLM API call |
+| 3 | Answer grounding | Post-LLM | < 25% answer keywords in context | Refuse answer |
+| 4 | Confidence threshold | Post-scoring | Confidence < 0.30 | Refuse answer |
+
+---
+
+## ── Confidence Scoring
 
 ```
-confidence = 0.5 × max_similarity
-           + 0.3 × avg_similarity
-           + 0.2 × answer_coverage
+confidence = 0.50 × max_similarity
+           + 0.30 × avg_similarity
+           + 0.20 × answer_coverage
 ```
 
-| Component | Weight | Description |
-|-----------|--------|-------------|
-| `max_similarity` | 50% | Highest cosine similarity among retrieved chunks |
-| `avg_similarity` | 30% | Mean cosine similarity across top-4 chunks |
-| `answer_coverage` | 20% | Fraction of answer keywords found in retrieved context |
+| Tier | Score | Badge |
+|---|---|---|
+| High | ≥ 70% | Green |
+| Medium | 45 – 69% | Amber |
+| Low / Blocked | < 30% | Red (guardrail blocks) |
 
-Score is clamped to `[0.0, 1.0]`. "Not found" answers get `confidence = 0.0`.
+Scores are clamped to `[0.0, 1.0]`. Guardrail-refused answers return `confidence = 0.0`.
 
-**Interpretation**:
-- 🟢 `≥ 70%` — High confidence
-- 🟡 `45–69%` — Medium confidence
-- 🔴 `< 30%` — Low (guardrail blocks this answer)
-
-> **Note:** Thresholds are tuned lower than naive defaults because logistics documents often have moderate embedding similarity scores due to their structured, repetitive, form-like text.
+> Thresholds are tuned lower than generic RAG defaults because logistics documents  
+> use repetitive, form-like language that naturally produces moderate embedding similarity.
 
 ---
 
-## 🔁 LLM Routing Strategy
+## ── LLM Routing
 
 ```
 Groq  →  OpenAI  →  Gemini  →  Ollama
 ```
 
-**Behavior**:
-1. Each provider is attempted in priority order
-2. If API key is missing → silently skip with log `⚠ Provider skipped`
-3. If API call fails (timeout, error) → log `✗ Provider failed: <reason>` and try next
-4. On success → log `✓ Provider responded in Xs` and return
-5. If all fail → `503 Service Unavailable` with full log
+- Missing key → provider silently skipped, logged as `⚠ skipped`
+- API error / timeout → logged as `✗ failed`, next provider tried
+- Success → logged as `✓ responded in Xs`, result returned immediately
+- All fail → `503 Service Unavailable` with full error log
 
-Providers are tried fresh on every request. No caching of LLM responses.
+No caching — providers are retried fresh on every request.
 
 ---
 
-## 🗂️ Structured Extraction
+## ── Structured Extraction
 
-**Fields**: `shipment_id`, `shipper`, `consignee`, `pickup_datetime`, `delivery_datetime`, `equipment_type`, `mode`, `rate`, `currency`, `weight`, `carrier_name`
+Extracts 11 fields using a **hybrid regex + LLM** approach:
 
-**Hybrid approach**:
-- **Regex** (priority): `rate`, `currency`, `weight`, `shipment_id`, `mode` — deterministic patterns
-- **LLM** (fills gaps): `shipper`, `consignee`, `carrier_name`, `equipment_type`, dates
+| Field | Method |
+|---|---|
+| `rate`, `currency`, `weight`, `shipment_id`, `mode` | Regex (deterministic, high precision) |
+| `shipper`, `consignee`, `carrier_name`, `equipment_type`, dates | LLM (handles varied phrasing) |
 
-The merge logic gives regex results priority for numeric/structured fields where LLMs may paraphrase incorrectly.
-
----
-
-## ⚠️ Failure Cases & Handling
-
-| Scenario | System Response |
-|----------|----------------|
-| Empty / unreadable document | 422 error with clear message |
-| Low similarity (off-topic question) | Guardrail → "Not found in document" |
-| All LLMs fail | 503 with provider error logs |
-| Missing API key | Provider silently skipped; next provider tried |
-| Hallucinated answer (low grounding) | Post-LLM guardrail → refused |
-| Confidence too low | Confidence guardrail → refused |
-| Unknown file type | 400 error with supported types listed |
+Regex results take priority for numeric/structured fields where LLMs may paraphrase.
 
 ---
 
-## 🚀 API Reference
+## ── API Reference
+
+### `GET /health`
+
+```json
+{
+  "status": "ok",
+  "embedding_location": "client-side (Streamlit)",
+  "embedding_model": "BAAI/bge-small-en",
+  "documents_indexed": 3
+}
+```
 
 ### `POST /upload_embeddings`
-Receive pre-computed embeddings from the client and store in FAISS.
 
-**Request** (`application/json`):
 ```json
+// Request
 {
   "doc_id": "uuid-generated-by-client",
   "filename": "bol.pdf",
-  "chunks":     [{"text": "...", "page": 1, "chunk_index": 0}, ...],
-  "embeddings": [[0.12, -0.05, ...], ...]   // float32, normalized
+  "chunks": [{"text": "...", "page": 1, "chunk_index": 0}],
+  "embeddings": [[0.12, -0.05, ...]]
 }
-```
-**Response**:
-```json
-{ "doc_id": "uuid", "filename": "bol.pdf", "chunks_count": 14, "message": "..." }
-```
 
----
+// Response
+{ "doc_id": "uuid", "filename": "bol.pdf", "chunks_count": 14 }
+```
 
 ### `POST /ask`
-Ask a natural language question (client sends pre-embedded query).
 
-**Request**:
 ```json
+// Request
 {
-  "doc_id":         "uuid",
-  "question":       "Who is the consignee?",
-  "query_embedding": [[0.08, -0.12, ...]]   // float32, shape [[dim]]
+  "doc_id": "uuid",
+  "question": "Who is the consignee?",
+  "query_embedding": [[0.08, -0.12, ...]]
 }
-```
-**Response**:
-```json
+
+// Response
 {
   "answer": "ABC Corp",
   "confidence": 0.87,
@@ -266,17 +399,13 @@ Ask a natural language question (client sends pre-embedded query).
 }
 ```
 
----
-
 ### `POST /extract`
-Extract structured shipment data.
 
-**Request**:
 ```json
+// Request
 { "doc_id": "uuid" }
-```
-**Response**:
-```json
+
+// Response
 {
   "doc_id": "uuid",
   "data": {
@@ -293,82 +422,55 @@ Extract structured shipment data.
     "carrier_name": "Fast Freight Inc"
   },
   "provider": "Groq",
-  "logs": ["✓ Groq responded"],
   "confidence": 0.82
 }
 ```
 
 ---
 
-## 🧠 Memory Optimization Strategy
+## ── Error Reference
 
-Ultra Doc-Intelligence v2 moves **all embedding computation to the Streamlit frontend**,
-keeping the FastAPI backend lightweight and deployable on constrained environments like
-Render's free tier (512 MB RAM).
-
-### Problem
-
-Loading `sentence-transformers` (with PyTorch) requires ~400–600 MB of RAM at startup,
-causing OOM crashes on Render free tier or any sub-1 GB server.
-
-### Solution
-
-| Layer | Responsibility | RAM Impact |
-|-------|---------------|------------|
-| **Streamlit frontend** | Parse, chunk, embed (BAAI/bge-small-en) | ~300 MB (runs on user's machine or a separate process) |
-| **FastAPI backend** | Receive float32 arrays, run FAISS, call LLM APIs | ~50–80 MB (no PyTorch) |
-
-### How it works
-
-1. **On document upload** — Streamlit parses the file locally, chunks the text, encodes
-   every chunk with `BGE-small`, and POSTs the resulting `float32` embedding matrix to
-   `/upload_embeddings`. The backend just calls `faiss.IndexFlatIP.add()`.
-
-2. **On every question** — Streamlit encodes the query string into a single vector and
-   sends it inside the `/ask` JSON body. The backend calls `index.search()` with the
-   provided vector — no model needed.
-
-3. **Normalization** — Both sides use L2-normalized vectors so inner-product = cosine
-   similarity. The backend applies a defensive re-normalization to catch any drift.
-
-### Benefits
-
-- ✅ Backend stays under 100 MB RAM  
-- ✅ No PyTorch / CUDA on the server  
-- ✅ Same embedding quality (same model, same normalization)  
-- ✅ Supports local execution and hosted deployment simultaneously  
-- ✅ Frontend model load is cached across uploads (`@st.cache_resource`)  
+| Scenario | Response |
+|---|---|
+| Off-topic question (low similarity) | Guardrail — "Not found in document" |
+| Hallucinated answer (low grounding) | Post-LLM guardrail — refused |
+| Confidence too low | Confidence guardrail — refused |
+| All LLMs unavailable | `503` with full provider error log |
+| Missing API key | Provider silently skipped, next tried |
+| Unknown file type | `400` — supported: PDF, DOCX, TXT |
+| Empty / unreadable document | `422` with clear message |
+| Document not found | `404` — upload first |
 
 ---
 
-## 🔮 Future Improvements
+## ── Supported Groq Models (April 2026)
 
-1. **Multi-document queries** — answer questions across an entire document library
-2. **Re-ranking** — add cross-encoder re-ranking step after FAISS retrieval
-3. **Streaming responses** — stream LLM tokens to UI for faster perceived response
-4. **Persistent metadata** — store doc_id ↔ filename mapping in SQLite
-5. **OCR support** — scanned PDF support via Tesseract/PaddleOCR
-6. **Evaluation harness** — automated RAG accuracy benchmarking with labeled QA pairs
-7. **Authentication** — API key auth for production deployment
-8. **Cloud vector DB** — swap FAISS for Pinecone/Weaviate for multi-user scale
+| Model | Notes |
+|---|---|
+| `llama-3.3-70b-versatile` | **Recommended** — best results |
+| `llama-3.1-8b-instant` | Faster, lower quality |
+| `mixtral-8x7b-32768` | Large context window |
+| `gemma2-9b-it` | Google-based alternative |
+
+> After changing `GROQ_MODEL` in `.env`, always restart uvicorn — settings are read at startup only.
 
 ---
 
-## 🛠️ Environment Variables
+## ── Roadmap
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `GROQ_API_KEY` | — | Groq API key (primary LLM) |
-| `OPENAI_API_KEY` | — | OpenAI API key (fallback) |
-| `GEMINI_API_KEY` | — | Google Gemini API key (fallback) |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
-| `OLLAMA_MODEL` | `llama3` | Ollama model name |
-| `TOP_K` | `5` | Chunks retrieved per query |
-| `SIMILARITY_THRESHOLD` | `0.35` | Min similarity to proceed (tuned for TMS docs) |
-| `CONFIDENCE_THRESHOLD` | `0.30` | Min confidence to return answer |
-| `CHUNK_SIZE` | `600` | Target chunk size (tokens) — frontend only |
-| `CHUNK_OVERLAP` | `100` | Chunk overlap (tokens) — frontend only |
+- Multi-document queries across an entire shipment library
+- Cross-encoder re-ranking after FAISS retrieval
+- Streaming LLM token output to UI
+- Persistent document metadata (SQLite)
+- Scanned PDF support (Tesseract / PaddleOCR)
+- API key authentication for production
+- Swap FAISS for Pinecone / Weaviate for multi-user scale
 
-> **Note:** `EMBEDDING_MODEL` has been removed from backend config. The model
-> `BAAI/bge-small-en` is hardcoded in the Streamlit frontend and is not
-> configurable via the backend `.env`.
+---
+
+<div align="center">
+
+Built by **Manvik Siddhpura** &nbsp;·&nbsp; 2025  
+Ultra Doc-Intelligence &nbsp;·&nbsp; AI-Powered Document Analysis for Transportation Management
+
+</div>
