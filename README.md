@@ -8,37 +8,34 @@
 ## 🏗️ Architecture
 
 ```
-┌───────────────────────────────────────────────────────────┐
-│                   Streamlit Frontend                       │
-│   Upload │ Q&A │ Confidence Bar │ Sources │ Extraction     │
-└─────────────────────────┬─────────────────────────────────┘
-                          │ HTTP (REST)
-                          ▼
-┌───────────────────────────────────────────────────────────┐
-│                   FastAPI Backend                          │
-│   POST /upload   POST /ask   POST /extract                 │
-└──────┬─────────────────┬─────────────────┬───────────────┘
-       │                 │                 │
-       ▼                 ▼                 ▼
-┌──────────┐    ┌─────────────────┐   ┌────────────┐
-│ Ingestor │    │  RAG Pipeline   │   │ Extractor  │
-│ (Parse + │    │ Retriever       │   │ Regex +    │
-│  Chunk)  │    │ Guardrails      │   │ LLM hybrid │
-└────┬─────┘    │ Confidence      │   └────────────┘
-     │          │ LLM Router      │
-     ▼          └────────┬────────┘
-┌──────────┐            │
-│ Embedder │            ▼
-│ bge-small│   ┌─────────────────┐
-│  -en     │   │  LLM Router     │
-└────┬─────┘   │  Groq (primary) │
-     │         │  OpenAI         │
-     ▼         │  Gemini         │
-┌──────────┐   │  Ollama (local) │
-│  FAISS   │   └─────────────────┘
-│ IndexFlat│
-│   IP     │
-└──────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                  Streamlit Frontend  (heavy ML here)              │
+│                                                                    │
+│  upload()                                                          │
+│  ├── Parse PDF/DOCX/TXT                                           │
+│  ├── Clean + chunk text (section-aware sliding window)            │
+│  ├── BGE-small-en.encode(passages, normalize=True)  ◄── PyTorch  │
+│  └── POST /upload_embeddings  { chunks, embeddings }              │
+│                                                                    │
+│  ask()                                                             │
+│  ├── BGE-small-en.encode("query: …", normalize=True)             │
+│  └── POST /ask  { doc_id, question, query_embedding }             │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │ JSON (float32 embeddings)
+┌──────────────────────────▼───────────────────────────────────────┐
+│              FastAPI Backend  (no PyTorch — ~50 MB RAM)           │
+│                                                                    │
+│  POST /upload_embeddings                                           │
+│  ├── np.array(embeddings, dtype=float32)                          │
+│  └── FAISS IndexFlatIP  →  storage/{doc_id}/                      │
+│                                                                    │
+│  POST /ask                                                         │
+│  ├── FAISS search (client embedding)                               │
+│  ├── Guardrails (similarity + grounding + confidence)             │
+│  └── LLM Router: Groq → OpenAI → Gemini → Ollama                 │
+│                                                                    │
+│  POST /extract  (regex + LLM hybrid, no embeddings)               │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -72,7 +69,7 @@ uvicorn main:app --reload --port 8000
 
 ```bash
 cd frontend
-pip install streamlit requests
+pip install -r requirements.txt
 streamlit run app.py
 ```
 
@@ -88,22 +85,23 @@ streamlit run app.py
 ```
 Ultra Doc-Intelligence/
 ├── backend/
-│   ├── main.py                  # FastAPI app (3 endpoints)
+│   ├── main.py                  # FastAPI app — /upload_embeddings, /ask, /extract
 │   ├── config.py                # Settings (pydantic-settings)
-│   ├── models.py                # Pydantic schemas
+│   ├── models.py                # Pydantic schemas (v2: UploadEmbeddingsRequest + query_embedding)
 │   ├── pipeline/
-│   │   ├── ingestor.py          # Document parsing & chunking
-│   │   ├── embedder.py          # BAAI/bge-small-en embeddings
+│   │   ├── embedder.py          # Stub only — normalization helper, no model loading
 │   │   ├── vector_store.py      # FAISS index management
-│   │   ├── retriever.py         # Similarity retrieval
+│   │   ├── retriever.py         # Similarity retrieval (accepts pre-computed vector)
 │   │   ├── guardrails.py        # Hallucination prevention
 │   │   ├── confidence.py        # Confidence scoring
 │   │   ├── llm_router.py        # Multi-provider LLM fallback
+│   │   ├── ingestor.py          # (kept for /extract raw text reading)
 │   │   └── extractor.py         # Structured data extraction
 │   ├── storage/                 # FAISS indexes (auto-created)
-│   └── requirements.txt
+│   └── requirements.txt         # No sentence-transformers / PyTorch
 ├── frontend/
-│   └── app.py                   # Streamlit UI
+│   ├── app.py                   # Streamlit UI + full embedding pipeline
+│   └── requirements.txt         # sentence-transformers + parsers live here
 ├── .env.example
 ├── .gitignore
 └── README.md
@@ -226,10 +224,18 @@ The merge logic gives regex results priority for numeric/structured fields where
 
 ## 🚀 API Reference
 
-### `POST /upload`
-Upload and index a document.
+### `POST /upload_embeddings`
+Receive pre-computed embeddings from the client and store in FAISS.
 
-**Request**: `multipart/form-data` with `file`  
+**Request** (`application/json`):
+```json
+{
+  "doc_id": "uuid-generated-by-client",
+  "filename": "bol.pdf",
+  "chunks":     [{"text": "...", "page": 1, "chunk_index": 0}, ...],
+  "embeddings": [[0.12, -0.05, ...], ...]   // float32, normalized
+}
+```
 **Response**:
 ```json
 { "doc_id": "uuid", "filename": "bol.pdf", "chunks_count": 14, "message": "..." }
@@ -238,11 +244,15 @@ Upload and index a document.
 ---
 
 ### `POST /ask`
-Ask a natural language question.
+Ask a natural language question (client sends pre-embedded query).
 
 **Request**:
 ```json
-{ "doc_id": "uuid", "question": "Who is the consignee?" }
+{
+  "doc_id":         "uuid",
+  "question":       "Who is the consignee?",
+  "query_embedding": [[0.08, -0.12, ...]]   // float32, shape [[dim]]
+}
 ```
 **Response**:
 ```json
@@ -290,6 +300,47 @@ Extract structured shipment data.
 
 ---
 
+## 🧠 Memory Optimization Strategy
+
+Ultra Doc-Intelligence v2 moves **all embedding computation to the Streamlit frontend**,
+keeping the FastAPI backend lightweight and deployable on constrained environments like
+Render's free tier (512 MB RAM).
+
+### Problem
+
+Loading `sentence-transformers` (with PyTorch) requires ~400–600 MB of RAM at startup,
+causing OOM crashes on Render free tier or any sub-1 GB server.
+
+### Solution
+
+| Layer | Responsibility | RAM Impact |
+|-------|---------------|------------|
+| **Streamlit frontend** | Parse, chunk, embed (BAAI/bge-small-en) | ~300 MB (runs on user's machine or a separate process) |
+| **FastAPI backend** | Receive float32 arrays, run FAISS, call LLM APIs | ~50–80 MB (no PyTorch) |
+
+### How it works
+
+1. **On document upload** — Streamlit parses the file locally, chunks the text, encodes
+   every chunk with `BGE-small`, and POSTs the resulting `float32` embedding matrix to
+   `/upload_embeddings`. The backend just calls `faiss.IndexFlatIP.add()`.
+
+2. **On every question** — Streamlit encodes the query string into a single vector and
+   sends it inside the `/ask` JSON body. The backend calls `index.search()` with the
+   provided vector — no model needed.
+
+3. **Normalization** — Both sides use L2-normalized vectors so inner-product = cosine
+   similarity. The backend applies a defensive re-normalization to catch any drift.
+
+### Benefits
+
+- ✅ Backend stays under 100 MB RAM  
+- ✅ No PyTorch / CUDA on the server  
+- ✅ Same embedding quality (same model, same normalization)  
+- ✅ Supports local execution and hosted deployment simultaneously  
+- ✅ Frontend model load is cached across uploads (`@st.cache_resource`)  
+
+---
+
 ## 🔮 Future Improvements
 
 1. **Multi-document queries** — answer questions across an entire document library
@@ -312,9 +363,12 @@ Extract structured shipment data.
 | `GEMINI_API_KEY` | — | Google Gemini API key (fallback) |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
 | `OLLAMA_MODEL` | `llama3` | Ollama model name |
-| `EMBEDDING_MODEL` | `BAAI/bge-small-en` | Sentence transformer model |
 | `TOP_K` | `5` | Chunks retrieved per query |
 | `SIMILARITY_THRESHOLD` | `0.35` | Min similarity to proceed (tuned for TMS docs) |
 | `CONFIDENCE_THRESHOLD` | `0.30` | Min confidence to return answer |
-| `CHUNK_SIZE` | `600` | Target chunk size (tokens) |
-| `CHUNK_OVERLAP` | `100` | Chunk overlap (tokens) |
+| `CHUNK_SIZE` | `600` | Target chunk size (tokens) — frontend only |
+| `CHUNK_OVERLAP` | `100` | Chunk overlap (tokens) — frontend only |
+
+> **Note:** `EMBEDDING_MODEL` has been removed from backend config. The model
+> `BAAI/bge-small-en` is hardcoded in the Streamlit frontend and is not
+> configurable via the backend `.env`.

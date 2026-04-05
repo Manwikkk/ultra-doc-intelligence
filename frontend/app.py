@@ -1,16 +1,27 @@
 """
-app.py — Streamlit frontend for Ultra Doc-Intelligence.
-Professional dark UI with full-width layout, structured results, and footer.
+app.py — Streamlit frontend for Ultra Doc-Intelligence (v2).
+
+v2 Architecture:
+  - Document parsing, chunking, and embedding (BAAI/bge-small-en) run here.
+  - Backend (FastAPI) only does FAISS storage + LLM inference — no PyTorch.
+  - Enables backend deployment on Render free tier (512 MB RAM).
 """
 from __future__ import annotations
 
+import io
 import os
+import re
+import uuid
 import base64
+import logging
 from pathlib import Path
-import json
+
+import numpy as np
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
+
+logger = logging.getLogger(__name__)
 
 # ── Favicon helper ────────────────────────────────────────────────────────────
 def get_favicon():
@@ -291,17 +302,14 @@ st.markdown("""
         margin: 2rem 0;
     }
 
-    /* ── Streamlit form — strip default border box ── */
+    /* ── Streamlit form ── */
     [data-testid="stForm"] {
         border: none !important;
         padding: 0 !important;
         background: transparent !important;
         box-shadow: none !important;
     }
-    /* Hide "Press Enter to submit form" helper text */
-    [data-testid="InputInstructions"] {
-        display: none !important;
-    }
+    [data-testid="InputInstructions"] { display: none !important; }
 
     /* ── Streamlit widget overrides ── */
     .stTextArea textarea {
@@ -391,6 +399,217 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+# ════════════════════════════════════════════════════════════
+#  CLIENT-SIDE EMBEDDING PIPELINE
+#  All heavy ML work runs in Streamlit — backend stays lean.
+# ════════════════════════════════════════════════════════════
+
+@st.cache_resource(show_spinner="Loading embedding model (BAAI/bge-small-en)…")
+def load_embedding_model():
+    """Load BGE-small once and cache for the lifetime of the Streamlit process."""
+    from sentence_transformers import SentenceTransformer
+    return SentenceTransformer("BAAI/bge-small-en")
+
+
+# ── Document parsing helpers (mirrors backend/pipeline/ingestor.py) ───────────
+
+SECTION_KEYWORDS = [
+    r"pickup", r"pick[\s\-]?up", r"drop[\s\-]?off", r"delivery",
+    r"consignee", r"shipper", r"rate breakdown", r"freight charges",
+    r"special instructions", r"bill of lading", r"pro number",
+    r"carrier", r"equipment", r"weight", r"hazmat", r"commodity",
+]
+SECTION_PATTERN = re.compile(
+    r"(?i)^.*(" + "|".join(SECTION_KEYWORDS) + r").*$",
+    re.MULTILINE,
+)
+CHARS_PER_TOKEN = 4
+MAX_CHUNKS = 100   # hard cap to keep request size sane
+
+
+def _parse_pdf(file_bytes: bytes) -> str:
+    try:
+        import fitz
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        pages = []
+        for i, page in enumerate(doc):
+            text = page.get_text("text")
+            if text.strip():
+                pages.append(f"[Page {i + 1}]\n{text}")
+        doc.close()
+        full = "\n\n".join(pages)
+        if len(full.strip()) > 50:
+            return full
+        raise ValueError("PyMuPDF returned insufficient text")
+    except Exception:
+        import pdfplumber
+        pages = []
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            for i, page in enumerate(pdf.pages):
+                text = page.extract_text() or ""
+                if text.strip():
+                    pages.append(f"[Page {i + 1}]\n{text}")
+        return "\n\n".join(pages)
+
+
+def _parse_docx(file_bytes: bytes) -> str:
+    from docx import Document
+    doc = Document(io.BytesIO(file_bytes))
+    parts = []
+    for para in doc.paragraphs:
+        if para.text.strip():
+            parts.append(para.text.strip())
+    for table in doc.tables:
+        for row in table.rows:
+            row_text = " | ".join(
+                cell.text.strip() for cell in row.cells if cell.text.strip()
+            )
+            if row_text:
+                parts.append(row_text)
+    return "\n".join(parts)
+
+
+def _clean_text(text: str) -> str:
+    text = re.sub(r"[^\x09\x0a\x0d\x20-\x7e\u00a0-\ufffd]", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.splitlines()]
+    return "\n".join(lines)
+
+
+def _chunk_text(text: str, chunk_size: int = 600, overlap: int = 100) -> list[dict]:
+    chunk_size_chars = chunk_size * CHARS_PER_TOKEN
+    overlap_chars = overlap * CHARS_PER_TOKEN
+
+    # Strip page tags, keep page map
+    page_map: dict[int, int] = {}
+    page_pattern = re.compile(r"\[Page (\d+)\]")
+    clean_parts, current_pos = [], 0
+    last_page = 1
+    for match in page_pattern.finditer(text):
+        clean_parts.append(text[current_pos:match.start()])
+        last_page = int(match.group(1))
+        page_map[sum(len(p) for p in clean_parts)] = last_page
+        current_pos = match.end()
+    clean_parts.append(text[current_pos:])
+    clean_text_no_tags = "".join(clean_parts)
+
+    def get_page(offset: int) -> int:
+        page = 1
+        for o, p in sorted(page_map.items()):
+            if o <= offset:
+                page = p
+            else:
+                break
+        return page
+
+    # Section boundaries
+    boundaries = [0]
+    for m in SECTION_PATTERN.finditer(clean_text_no_tags):
+        if m.start() - boundaries[-1] > 200:
+            boundaries.append(m.start())
+    boundaries.append(len(clean_text_no_tags))
+
+    raw_sections = [
+        (clean_text_no_tags[boundaries[i]:boundaries[i + 1]].strip(), boundaries[i])
+        for i in range(len(boundaries) - 1)
+        if clean_text_no_tags[boundaries[i]:boundaries[i + 1]].strip()
+    ]
+
+    final_chunks, chunk_idx = [], 0
+    for section_text, section_start in raw_sections:
+        if len(section_text) <= chunk_size_chars:
+            final_chunks.append({
+                "text": section_text,
+                "chunk_index": chunk_idx,
+                "page": get_page(section_start),
+            })
+            chunk_idx += 1
+        else:
+            start = 0
+            while start < len(section_text):
+                end = min(start + chunk_size_chars, len(section_text))
+                chunk = section_text[start:end].strip()
+                if chunk:
+                    final_chunks.append({
+                        "text": chunk,
+                        "chunk_index": chunk_idx,
+                        "page": get_page(section_start + start),
+                    })
+                    chunk_idx += 1
+                if end == len(section_text):
+                    break
+                start += chunk_size_chars - overlap_chars
+
+    # Merge tiny chunks
+    MIN_CHUNK_CHARS = 150
+    merged = []
+    for chunk in final_chunks:
+        if merged and len(chunk["text"]) < MIN_CHUNK_CHARS:
+            merged[-1]["text"] += " " + chunk["text"]
+        else:
+            merged.append(chunk)
+    for i, c in enumerate(merged):
+        c["chunk_index"] = i
+
+    return merged
+
+
+def process_document(file_bytes: bytes, filename: str) -> tuple[str, list[dict], np.ndarray]:
+    """
+    Full client-side pipeline:
+      parse → clean → chunk → embed
+
+    Returns:
+        doc_id   : UUID string
+        chunks   : list of {text, page, chunk_index}
+        embeddings: float32 array (N, dim), L2-normalized
+    """
+    suffix = Path(filename).suffix.lower()
+    if suffix == ".pdf":
+        raw_text = _parse_pdf(file_bytes)
+    elif suffix in (".docx", ".doc"):
+        raw_text = _parse_docx(file_bytes)
+    elif suffix == ".txt":
+        raw_text = file_bytes.decode("utf-8", errors="replace")
+    else:
+        raise ValueError(f"Unsupported file type: {suffix}")
+
+    cleaned = _clean_text(raw_text)
+    chunks = _chunk_text(cleaned)
+
+    # Cap chunk count to keep request size manageable
+    if len(chunks) > MAX_CHUNKS:
+        chunks = chunks[:MAX_CHUNKS]
+        for i, c in enumerate(chunks):
+            c["chunk_index"] = i
+
+    # Embed with passage prefix (BGE instruction format)
+    model = load_embedding_model()
+    prefixed = [f"passage: {c['text']}" for c in chunks]
+    embeddings = model.encode(
+        prefixed,
+        batch_size=32,
+        show_progress_bar=False,
+        convert_to_numpy=True,
+        normalize_embeddings=True,
+    ).astype(np.float32)
+
+    doc_id = str(uuid.uuid4())
+    return doc_id, chunks, embeddings
+
+
+def embed_query(question: str) -> np.ndarray:
+    """Embed a single query with the BGE query prefix."""
+    model = load_embedding_model()
+    vec = model.encode(
+        [f"query: {question}"],
+        show_progress_bar=False,
+        convert_to_numpy=True,
+        normalize_embeddings=True,
+    ).astype(np.float32)
+    return vec   # shape (1, dim)
+
+
 # ── Session state defaults ────────────────────────────────────────────────────
 _DEFAULTS = {
     "doc_id":         None,
@@ -423,12 +642,6 @@ def backend_check() -> tuple[bool, str]:
         return False, f"Timed out at {url}"
     except Exception as e:
         return False, str(e)
-
-
-def conf_class(score: float) -> str:
-    if score >= 0.70: return "conf-value-high"
-    if score >= 0.45: return "conf-value-medium"
-    return "conf-value-low"
 
 
 def provider_badge(provider: str) -> str:
@@ -496,22 +709,40 @@ with left_col:
     )
 
     if uploaded_file and st.session_state.filename != uploaded_file.name:
-        with st.spinner(f"Ingesting **{uploaded_file.name}**…"):
+        with st.spinner(f"Parsing & embedding **{uploaded_file.name}** (client-side)…"):
             try:
+                file_bytes = uploaded_file.getvalue()
+
+                # ── Client-side: parse → chunk → embed ────────────────────────
+                doc_id, chunks, embeddings = process_document(
+                    file_bytes, uploaded_file.name
+                )
+
+                # ── POST to backend: store FAISS index ────────────────────────
+                payload = {
+                    "doc_id":     doc_id,
+                    "filename":   uploaded_file.name,
+                    "chunks":     chunks,
+                    "embeddings": embeddings.tolist(),
+                }
                 resp = requests.post(
-                    f"{get_url()}/upload",
-                    files={"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)},
+                    f"{get_url()}/upload_embeddings",
+                    json=payload,
                     timeout=120,
                 )
+
                 if resp.status_code == 200:
                     data = resp.json()
                     st.session_state.doc_id         = data["doc_id"]
                     st.session_state.filename       = uploaded_file.name
                     st.session_state.ask_result     = None
                     st.session_state.extract_result = None
-                    st.success(f"**{uploaded_file.name}** — {data['chunks_count']} chunks indexed")
+                    st.success(
+                        f"**{uploaded_file.name}** — {data['chunks_count']} chunks embedded & indexed"
+                    )
                 else:
                     st.error(f"Upload failed: {resp.json().get('detail', resp.text)}")
+
             except requests.exceptions.ConnectionError:
                 st.error(f"Cannot reach backend at {get_url()}.")
             except Exception as e:
@@ -528,7 +759,7 @@ with left_col:
 
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
-    # ── Ask (Enter to submit) ─────────────────────────────────────────────────
+    # ── Ask ───────────────────────────────────────────────────────────────────
     st.markdown('<div class="section-label">Ask a Question</div>', unsafe_allow_html=True)
 
     no_doc = st.session_state.doc_id is None or not alive
@@ -548,7 +779,7 @@ with left_col:
             type="primary",
         )
 
-    # Allow Enter to submit the form (Shift+Enter for newline)
+    # Allow Enter to submit
     components.html(
         """
         <script>
@@ -572,11 +803,19 @@ with left_col:
     )
 
     if ask_btn and question.strip():
-        with st.spinner("Retrieving answer…"):
+        with st.spinner("Embedding query & retrieving answer…"):
             try:
+                # ── Client-side: embed the query ──────────────────────────────
+                query_vec = embed_query(question.strip())
+
+                # ── POST to backend: FAISS search + LLM ──────────────────────
                 resp = requests.post(
                     f"{get_url()}/ask",
-                    json={"doc_id": st.session_state.doc_id, "question": question},
+                    json={
+                        "doc_id":          st.session_state.doc_id,
+                        "question":        question.strip(),
+                        "query_embedding": query_vec.tolist(),
+                    },
                     timeout=90,
                 )
                 if resp.status_code == 200:
@@ -632,8 +871,9 @@ with left_col:
   <div style="font-size:0.8rem;color:rgba(255,255,255,0.45);font-weight:600;margin-bottom:0.65rem;letter-spacing:0.3px">How it works</div>
   <div style="font-size:0.8rem;color:rgba(255,255,255,0.28);line-height:2;letter-spacing:0.1px">
     1. Upload a PDF, DOCX, or TXT logistics document<br>
-    2. Ask questions in plain English via the query panel<br>
-    3. Use structured extraction to pull key shipment fields<br><br>
+    2. Document is parsed &amp; embedded here in your browser session<br>
+    3. Embeddings sent to backend for FAISS storage<br>
+    4. Ask questions — query is embedded here, answer retrieved via LLM<br><br>
     <span style="color:rgba(255,255,255,0.2)">Supports: Bill of Lading · Rate Confirmation · Carrier RC · Invoices</span>
   </div>
 </div>

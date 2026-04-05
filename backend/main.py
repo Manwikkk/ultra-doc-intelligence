@@ -1,17 +1,22 @@
 """
-main.py — FastAPI application for Ultra Doc-Intelligence.
+main.py — FastAPI application for Ultra Doc-Intelligence (v2).
+
+Architecture (v2):
+  - Embeddings are computed in the Streamlit frontend (BAAI/bge-small-en).
+  - Backend receives pre-computed float32 embeddings via JSON.
+  - No sentence-transformers / PyTorch loaded on the server.
+  - Enables deployment on Render free tier (512 MB RAM).
 
 Endpoints:
-  POST /upload    → Ingest document, embed, store in FAISS
-  POST /ask       → RAG question answering with guardrails + confidence
-  POST /extract   → Structured shipment data extraction
-  GET  /health    → Health check
-  GET  /docs      → Available doc_ids
+  POST /upload_embeddings → Accept chunks + embeddings, store in FAISS
+  POST /ask               → RAG Q&A (uses client-provided query embedding)
+  POST /extract           → Structured shipment data extraction
+  GET  /health            → Health check
+  GET  /documents         → List indexed doc_ids
 """
 from __future__ import annotations
 
 import logging
-import tempfile
 import traceback
 import os
 from pathlib import Path
@@ -24,11 +29,13 @@ os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
 os.environ["MALLOC_ARENA_MAX"] = "2"
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
+import numpy as np
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import settings
 from models import (
+    UploadEmbeddingsRequest,
     UploadResponse,
     AskRequest,
     AskResponse,
@@ -36,8 +43,7 @@ from models import (
     ExtractResponse,
     SourceChunk,
 )
-from pipeline.ingestor import ingest_file
-from pipeline.embedder import embed_passages
+from pipeline.embedder import ensure_normalized
 from pipeline.vector_store import save_index, doc_exists, list_documents
 from pipeline.retriever import retrieve
 from pipeline.guardrails import (
@@ -57,18 +63,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ── Debug: Print active Groq model and API key (first 8 chars) ──
-logger.info(f"[DEBUG] GROQ_MODEL: {settings.groq_model}")
-logger.info(f"[DEBUG] GROQ_API_KEY: {settings.groq_api_key[:8]}... (hidden)")
+logger.info("[DEBUG] GROQ_MODEL: %s", settings.groq_model)
+logger.info("[DEBUG] GROQ_API_KEY: %s... (hidden)", settings.groq_api_key[:8] if settings.groq_api_key else "MISSING")
 
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="Ultra Doc-Intelligence",
     description=(
         "AI-powered document intelligence for Transportation Management Systems. "
-        "Upload logistics documents and query them with natural language."
+        "Upload logistics documents and query them with natural language. "
+        "v2: Embeddings computed client-side — backend is PyTorch-free."
     ),
-    version="1.0.0",
+    version="2.0.0",
 )
 
 app.add_middleware(
@@ -80,7 +86,6 @@ app.add_middleware(
 )
 
 STORAGE_PATH = settings.storage_path
-ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc", ".txt"}
 
 
 # ── Health check ──────────────────────────────────────────────────────────────
@@ -91,7 +96,8 @@ async def health_check():
     docs = list_documents(STORAGE_PATH)
     return {
         "status": "ok",
-        "embedding_model": settings.embedding_model,
+        "embedding_location": "client-side (Streamlit)",
+        "embedding_model": "BAAI/bge-small-en",
         "documents_indexed": len(docs),
         "storage_path": str(STORAGE_PATH),
     }
@@ -104,72 +110,64 @@ async def list_docs():
     return {"doc_ids": docs, "count": len(docs)}
 
 
-# ── POST /upload ──────────────────────────────────────────────────────────────
+# ── POST /upload_embeddings ───────────────────────────────────────────────────
 
-@app.post("/upload", response_model=UploadResponse, tags=["Pipeline"])
-async def upload_document(file: UploadFile = File(...)):
+@app.post("/upload_embeddings", response_model=UploadResponse, tags=["Pipeline"])
+async def upload_embeddings(request: UploadEmbeddingsRequest):
     """
-    Ingest a logistics document:
-      1. Parse (PDF/DOCX/TXT)
-      2. Clean & intelligently chunk
-      3. Embed with BAAI/bge-small-en
-      4. Store in per-document FAISS index
+    Accept pre-computed chunk embeddings from the client and store in FAISS.
+
+    The client (Streamlit) is responsible for:
+      1. Parsing the document
+      2. Chunking the text
+      3. Computing embeddings with BAAI/bge-small-en
+      4. Sending chunks + embeddings here
+
+    Backend:
+      - Converts embeddings list → float32 numpy array
+      - Normalizes (defensively)
+      - Stores in per-document FAISS IndexFlatIP
     """
-    # Validate file type
-    suffix = Path(file.filename).suffix.lower()
-    if suffix not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file type '{suffix}'. Allowed: {', '.join(ALLOWED_EXTENSIONS)}",
-        )
-
-    # Save upload to a temp file
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        content = await file.read()
-        tmp.write(content)
-        tmp_path = Path(tmp.name)
-
     try:
-        logger.info("Processing upload: %s (%d bytes)", file.filename, len(content))
-
-        # Step 1: Parse + chunk
-        ingested = ingest_file(
-            tmp_path,
-            chunk_size=settings.chunk_size,
-            overlap=settings.chunk_overlap,
-        )
-        ingested["filename"] = file.filename  # Preserve original name
-
-        chunks = ingested["chunks"]
+        chunks = request.chunks
         if not chunks:
-            raise HTTPException(status_code=422, detail="Document appears to be empty or unreadable.")
+            raise HTTPException(status_code=422, detail="No chunks provided.")
 
-        # Step 2: Embed passages
-        texts = [c["text"] for c in chunks]
-        embeddings = embed_passages(texts, model_name=settings.embedding_model)
+        if len(chunks) != len(request.embeddings):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Mismatch: {len(chunks)} chunks but "
+                    f"{len(request.embeddings)} embeddings provided."
+                ),
+            )
 
-        # Step 3: Store in FAISS
-        save_index(STORAGE_PATH, ingested["doc_id"], embeddings, chunks)
+        # Convert to float32 numpy array and normalize defensively
+        embeddings_np = np.array(request.embeddings, dtype=np.float32)
+        embeddings_np = ensure_normalized(embeddings_np)
+
+        # Store in FAISS
+        save_index(STORAGE_PATH, request.doc_id, embeddings_np, chunks)
 
         logger.info(
-            "Upload complete: doc_id=%s, chunks=%d",
-            ingested["doc_id"],
+            "Stored index: doc_id=%s, filename=%s, chunks=%d, dim=%d",
+            request.doc_id,
+            request.filename,
             len(chunks),
+            embeddings_np.shape[1],
         )
 
         return UploadResponse(
-            doc_id=ingested["doc_id"],
-            filename=file.filename,
+            doc_id=request.doc_id,
+            filename=request.filename,
             chunks_count=len(chunks),
         )
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Upload failed: %s\n%s", e, traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Document processing failed: {str(e)}")
-    finally:
-        tmp_path.unlink(missing_ok=True)
+        logger.error("upload_embeddings failed: %s\n%s", e, traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 
 # ── POST /ask ─────────────────────────────────────────────────────────────────
@@ -177,9 +175,15 @@ async def upload_document(file: UploadFile = File(...)):
 @app.post("/ask", response_model=AskResponse, tags=["Pipeline"])
 async def ask_question(request: AskRequest):
     """
-    RAG question answering with full guardrails:
+    RAG question answering with full guardrails.
+
+    Client sends the query embedding (pre-computed with BAAI/bge-small-en).
+    Backend performs FAISS retrieval, applies guardrails, calls LLM router,
+    and returns answer + sources + confidence.
+
+    Pipeline:
       1. Validate doc_id exists
-      2. Retrieve top_k chunks via FAISS
+      2. Retrieve top_k chunks via FAISS (using client-provided embedding)
       3. Pre-LLM guardrails (empty context, similarity threshold)
       4. Call LLM router (Groq → OpenAI → Gemini → Ollama)
       5. Post-LLM guardrails (answer grounding)
@@ -196,13 +200,19 @@ async def ask_question(request: AskRequest):
     logs: list[str] = []
 
     try:
+        # Convert client query embedding to numpy
+        query_vec = np.array(request.query_embedding, dtype=np.float32)
+        if query_vec.ndim == 1:
+            query_vec = query_vec.reshape(1, -1)
+
+        logs.append(f"Query embedding received (dim={query_vec.shape[1]})")
+
         # Step 1: Retrieve
         chunks = retrieve(
             STORAGE_PATH,
             request.doc_id,
-            request.question,
+            query_vector=query_vec,
             top_k=settings.top_k,
-            model_name=settings.embedding_model,
         )
         logs.append(f"Retrieved {len(chunks)} chunks from index")
 
@@ -296,7 +306,6 @@ async def ask_question(request: AskRequest):
     except HTTPException:
         raise
     except RuntimeError as e:
-        # All LLM providers failed
         logger.error("All LLM providers failed: %s", e)
         raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:

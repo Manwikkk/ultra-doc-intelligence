@@ -1,8 +1,8 @@
 """
 retriever.py — Query retrieval from FAISS index.
 
-Embeds the user query, searches the document's FAISS index,
-and returns top_k chunks with their cosine similarity scores.
+Accepts a pre-computed query embedding (float32, shape (1, dim)) from the
+caller — no embedding model is loaded on the backend.
 """
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from pathlib import Path
 
 import numpy as np
 
-from pipeline.embedder import embed_query
 from pipeline.vector_store import load_index
 from models import RetrievedChunk
 
@@ -21,23 +20,32 @@ logger = logging.getLogger(__name__)
 def retrieve(
     storage_path: Path,
     doc_id: str,
-    question: str,
+    query_vector: np.ndarray,   # shape (1, dim), float32, already L2-normalized
     top_k: int = 4,
-    model_name: str = "BAAI/bge-small-en",
 ) -> list[RetrievedChunk]:
     """
-    Retrieve the top_k most relevant chunks for a question.
+    Retrieve the top_k most relevant chunks for a pre-computed query embedding.
 
     Steps:
-      1. Embed the query with instruction prefix "query: <text>"
-      2. Search the doc's FAISS IndexFlatIP
-      3. Return chunks sorted by descending similarity
+      1. Load the doc's FAISS IndexFlatIP
+      2. Search with the provided query_vector
+      3. Return chunks sorted by descending cosine similarity
+
+    Args:
+        storage_path: Root storage directory.
+        doc_id:       Unique document identifier.
+        query_vector: float32 array of shape (1, dim), L2-normalized.
+        top_k:        Number of results to return.
 
     Returns:
         List of RetrievedChunk objects, sorted by similarity descending.
     """
-    # Embed query
-    query_vec = embed_query(question, model_name=model_name)  # shape (1, dim)
+    if query_vector.ndim != 2 or query_vector.shape[0] != 1:
+        raise ValueError(
+            f"query_vector must have shape (1, dim), got {query_vector.shape}"
+        )
+
+    query_vector = query_vector.astype(np.float32)
 
     # Load FAISS index + chunk metadata
     index, chunks_meta = load_index(storage_path, doc_id)
@@ -49,15 +57,14 @@ def retrieve(
         return []
 
     # Search — returns (1, k) arrays of distances and indices
-    distances, indices = index.search(query_vec, k)
+    distances, indices = index.search(query_vector, k)
 
-    # distances[0] are inner products = cosine similarities (since normalized)
+    # distances[0] are inner products = cosine similarities (on normalized vecs)
     results: list[RetrievedChunk] = []
     for dist, idx in zip(distances[0], indices[0]):
         if idx < 0 or idx >= len(chunks_meta):
             continue  # FAISS can return -1 for unfilled slots
         meta = chunks_meta[idx]
-        # Clamp similarity to [0, 1] — can be slightly > 1 due to float precision
         similarity = float(np.clip(dist, 0.0, 1.0))
         results.append(
             RetrievedChunk(

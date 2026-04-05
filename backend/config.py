@@ -33,8 +33,8 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-3.5-turbo"
     gemini_model: str = "gemini-1.5-flash"
 
-    # ── Embedding ─────────────────────────────────────────────────────────────
-    embedding_model: str = "BAAI/bge-small-en"
+    # ── NOTE: Embedding model runs client-side (Streamlit) ────────────────────
+    # embedding_model removed in v2 — backend is PyTorch-free.
 
     # ── Storage ───────────────────────────────────────────────────────────────
     storage_dir: str = "./storage"
